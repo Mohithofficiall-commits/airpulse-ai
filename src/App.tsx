@@ -1,281 +1,399 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import {
-  Activity, Bell, Check, ChevronDown, CircleHelp,
-  Database, Download, FileCheck2, Gauge, LayoutDashboard,
-  Map as MapIcon, MapPin, Menu, Search, Settings as SettingsIcon, ShieldCheck,
-  SlidersHorizontal, Sparkles, Wind, X, RefreshCw, TrendingUp, Clock3, Thermometer,
-  Droplets, Navigation, ArrowUpRight, Info, CheckCircle2, CircleAlert
+  Activity, Bell, ChevronDown, CircleHelp, CircleAlert, CheckCircle2,
+  Database, Download, Gauge, Map as MapIcon,
+  Menu, Search, Settings as SettingsIcon, SlidersHorizontal, Sparkles,
+  Wind, X, RefreshCw, TrendingUp, Thermometer, Droplets, Navigation,
+  Info, FlaskConical, TriangleAlert, LineChart as LineChartIcon,
 } from 'lucide-react';
 import {
-  Area, AreaChart, CartesianGrid, Line, LineChart,
-  ResponsiveContainer, Tooltip, XAxis, YAxis
+  Area, AreaChart, CartesianGrid, Line, ReferenceLine,
+  ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts';
 import { MapContainer, TileLayer, CircleMarker, Popup, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
+import {
+  POLLUTANTS, category, detectAnomaly, inferCauses, CAUSE_DISCLAIMER,
+  generateAlert, resolveStatus, severityFor, subIndex,
+  type GeneratedAlert, type PollutantKey,
+} from '@/lib/aqi';
+import { COMPUTED, CURRENT_MONTH, DATA_NOTICE, STATES, findStation, type StationComputed } from '@/lib/data';
 
-type Pollutant = 'PM2.5' | 'PM10' | 'NO₂' | 'SO₂' | 'CO' | 'O₃' | 'NH₃';
-type LocationData = {
-  id: string; city: string; state: string; lat: number; lng: number;
-  pm25: number; pm10: number; no2: number; so2: number; co: number; o3: number;
-  temp: number; humidity: number; wind: number; windDir: string; updated: string;
-};
-type AlertRecord = { id: number; location: string; threshold: number; enabled: boolean; pollutant: string };
+type View = 'explorer' | 'map' | 'investigate' | 'alerts' | 'settings';
 
-const seedLocations: LocationData[] = [
-  { id:'DEL-01', city:'New Delhi', state:'Delhi', lat:28.6139, lng:77.2090, pm25:86, pm10:174, no2:38, so2:12, co:1.1, o3:34, temp:32, humidity:48, wind:8.2, windDir:'NW', updated:'2026-09-29 12:45 IST' },
-  { id:'MUM-02', city:'Mumbai', state:'Maharashtra', lat:19.0760, lng:72.8777, pm25:42, pm10:91, no2:27, so2:9, co:0.7, o3:41, temp:30, humidity:72, wind:11.4, windDir:'W', updated:'2026-09-29 12:42 IST' },
-  { id:'CHE-03', city:'Chennai', state:'Tamil Nadu', lat:13.0827, lng:80.2707, pm25:31, pm10:68, no2:21, so2:7, co:0.5, o3:29, temp:31, humidity:69, wind:13.1, windDir:'SE', updated:'2026-09-29 12:40 IST' },
-  { id:'BLR-04', city:'Bengaluru', state:'Karnataka', lat:12.9716, lng:77.5946, pm25:24, pm10:54, no2:17, so2:5, co:0.4, o3:26, temp:27, humidity:61, wind:9.3, windDir:'E', updated:'2026-09-29 12:39 IST' },
-  { id:'KOL-05', city:'Kolkata', state:'West Bengal', lat:22.5726, lng:88.3639, pm25:64, pm10:131, no2:33, so2:14, co:0.9, o3:37, temp:31, humidity:74, wind:6.4, windDir:'S', updated:'2026-09-29 12:35 IST' },
-  { id:'HYD-06', city:'Hyderabad', state:'Telangana', lat:17.3850, lng:78.4867, pm25:37, pm10:76, no2:24, so2:8, co:0.6, o3:32, temp:29, humidity:55, wind:10.1, windDir:'NE', updated:'2026-09-29 12:32 IST' },
-  { id:'THJ-07', city:'Thanjavur', state:'Tamil Nadu', lat:10.7867, lng:79.1378, pm25:19, pm10:42, no2:12, so2:4, co:0.3, o3:22, temp:30, humidity:63, wind:12.2, windDir:'E', updated:'2026-09-29 12:30 IST' },
-];
-
-const bands: Record<Pollutant, { ranges: [number, number, number, number][]; unit: string }> = {
-  'PM2.5': { unit:'µg/m³', ranges:[[0,30,0,50],[31,60,51,100],[61,90,101,200],[91,120,201,300],[121,250,301,400],[251,500,401,500]] },
-  'PM10': { unit:'µg/m³', ranges:[[0,50,0,50],[51,100,51,100],[101,250,101,200],[251,350,201,300],[351,430,301,400],[431,600,401,500]] },
-  'NO₂': { unit:'µg/m³', ranges:[[0,40,0,50],[41,80,51,100],[81,180,101,200],[181,280,201,300],[281,400,301,400],[401,800,401,500]] },
-  'SO₂': { unit:'µg/m³', ranges:[[0,40,0,50],[41,80,51,100],[81,380,101,200],[381,800,201,300],[801,1600,301,400],[1601,2000,401,500]] },
-  'CO': { unit:'mg/m³', ranges:[[0,1,0,50],[1.1,2,51,100],[2.1,10,101,200],[10.1,17,201,300],[17.1,34,301,400],[34.1,50,401,500]] },
-  'O₃': { unit:'µg/m³', ranges:[[0,50,0,50],[51,100,51,100],[101,168,101,200],[169,208,201,300],[209,748,301,400],[749,1000,401,500]] },
-  'NH₃': { unit:'µg/m³', ranges:[[0,200,0,50],[201,400,51,100],[401,800,101,200],[801,1200,201,300],[1201,1800,301,400],[1801,2400,401,500]] },
-};
-function subIndex(value: number, pollutant: Pollutant) {
-  const range = bands[pollutant].ranges.find(([lo, hi]) => value >= lo && value <= hi);
-  if (!range) return value > 0 ? 500 : 0;
-  const [bLo,bHi,iLo,iHi] = range;
-  return Math.round(((iHi-iLo)/(bHi-bLo))*(value-bLo)+iLo);
-}
-function getAQI(loc: LocationData) {
-  const indexes = [
-    { name:'PM2.5', value:subIndex(loc.pm25,'PM2.5') },
-    { name:'PM10', value:subIndex(loc.pm10,'PM10') },
-    { name:'NO₂', value:subIndex(loc.no2,'NO₂') },
-    { name:'SO₂', value:subIndex(loc.so2,'SO₂') },
-    { name:'CO', value:subIndex(loc.co,'CO') },
-    { name:'O₃', value:subIndex(loc.o3,'O₃') },
-  ];
-  const dominant = indexes.reduce((a,b) => b.value > a.value ? b : a);
-  return { value:dominant.value, dominant:dominant.name };
-}
-function category(aqi:number) {
-  if (aqi <= 50) return { label:'Good', color:'#16a36a', bg:'#e5f7ee', text:'Air quality is satisfactory; risk is low.' };
-  if (aqi <= 100) return { label:'Satisfactory', color:'#82b735', bg:'#f0f7df', text:'Minor breathing discomfort may occur in sensitive people.' };
-  if (aqi <= 200) return { label:'Moderate', color:'#e9b329', bg:'#fff6d9', text:'People with lung, heart or asthma conditions should limit prolonged exertion.' };
-  if (aqi <= 300) return { label:'Poor', color:'#ef8734', bg:'#fff0e2', text:'Prolonged exposure may cause breathing discomfort.' };
-  if (aqi <= 400) return { label:'Very Poor', color:'#e84e55', bg:'#ffeaeb', text:'Respiratory effects may occur with prolonged exposure.' };
-  return { label:'Severe', color:'#9b2638', bg:'#f9e5e9', text:'Health impacts are possible even in healthy people; reduce outdoor exposure.' };
-}
-const history = [
-  {time:'06:00',aqi:78,pm25:34},{time:'08:00',aqi:91,pm25:42},{time:'10:00',aqi:104,pm25:49},
-  {time:'12:00',aqi:121,pm25:58},{time:'14:00',aqi:116,pm25:55},{time:'16:00',aqi:108,pm25:51},
-  {time:'18:00',aqi:126,pm25:61},{time:'20:00',aqi:119,pm25:57},{time:'22:00',aqi:98,pm25:46},
-];
-const forecast = [
-  {time:'Now',aqi:121,low:111,high:131},{time:'+4h',aqi:116,low:100,high:132},
-  {time:'+8h',aqi:109,low:88,high:130},{time:'+12h',aqi:103,low:78,high:128},
-  {time:'+16h',aqi:111,low:82,high:140},{time:'+20h',aqi:118,low:84,high:152},
-  {time:'+24h',aqi:112,low:74,high:150},
-];
 const navItems = [
-  { id:'overview', label:'Overview', icon:LayoutDashboard, group:'COMMAND' },
-  { id:'map', label:'Live Map', icon:MapIcon, group:'COMMAND' },
-  { id:'investigate', label:'Investigations', icon:Search, group:'INTELLIGENCE' },
-  { id:'forecast', label:'Forecast & Trends', icon:TrendingUp, group:'INTELLIGENCE' },
-  { id:'alerts', label:'Alerts', icon:Bell, group:'INTELLIGENCE' },
-  { id:'passports', label:'Evidence Passports', icon:ShieldCheck, group:'EVIDENCE' },
-  { id:'settings', label:'Settings', icon:SettingsIcon, group:'SYSTEM' },
+  { id: 'explorer', label: 'All-India Explorer', icon: Search, group: 'COMMAND' },
+  { id: 'map', label: 'Live Map', icon: MapIcon, group: 'COMMAND' },
+  { id: 'investigate', label: 'Investigations', icon: FlaskConical, group: 'INTELLIGENCE' },
+  { id: 'alerts', label: 'Alerts', icon: Bell, group: 'INTELLIGENCE' },
+  { id: 'settings', label: 'Settings', icon: SettingsIcon, group: 'SYSTEM' },
 ] as const;
-type View = typeof navItems[number]['id'];
 
-function Badge({ children, color='#087443', bg='#e5f7ee' }: {children:ReactNode;color?:string;bg?:string}) {
-  return <span className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold tracking-wide" style={{color,background:bg}}><span className="h-1.5 w-1.5 rounded-full" style={{background:color}} />{children}</span>;
+const SEASONS = [
+  { name: 'Winter (Dec–Feb)', months: [11, 0, 1] },
+  { name: 'Summer (Mar–May)', months: [2, 3, 4] },
+  { name: 'Monsoon (Jun–Sep)', months: [5, 6, 7, 8] },
+  { name: 'Post-monsoon (Oct–Nov)', months: [9, 10] },
+];
+
+const monthLabel = (m: number) => new Date(2026, m, 1).toLocaleString('en', { month: 'short' });
+
+function Badge({ children, color = '#087443', bg = '#e5f7ee' }: { children: ReactNode; color?: string; bg?: string }) {
+  return <span className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold tracking-wide" style={{ color, background: bg }}><span className="h-1.5 w-1.5 rounded-full" style={{ background: color }} />{children}</span>;
 }
-function Card({ children, className='' }: {children:ReactNode;className?:string}) {
+function Card({ children, className = '' }: { children: ReactNode; className?: string }) {
   return <section className={`rounded-2xl border border-[#e3ece8] bg-white shadow-[0_5px_22px_rgba(26,65,52,.045)] ${className}`}>{children}</section>;
 }
-function SectionTitle({ title, subtitle, action }: {title:string;subtitle?:string;action?:React.ReactNode}) {
+function SectionTitle({ title, subtitle, action }: { title: string; subtitle?: string; action?: React.ReactNode }) {
   return <div className="mb-5 flex flex-wrap items-end justify-between gap-3"><div><h2 className="text-xl font-bold tracking-tight text-[#183c32]">{title}</h2>{subtitle && <p className="mt-1 text-sm text-[#7a9188]">{subtitle}</p>}</div>{action}</div>;
 }
-function MapContents({ locations, onSelect, selectedId }: {locations:LocationData[];onSelect:(id:string)=>void;selectedId:string}) {
+function modeBadgeColors(mode: 'DEMO' | 'MODEL') {
+  return mode === 'MODEL' ? { color: '#087443', bg: '#e5f7ee' } : { color: '#3c6556', bg: '#eef3f1' };
+}
+
+function MapContents({ points, onSelect, selectedId }: { points: StationComputed[]; onSelect: (id: string) => void; selectedId: string }) {
   const map = useMap();
-  return <>{locations.map((loc) => {
-    const aqi = getAQI(loc).value;
-    const c = category(aqi);
-    return <CircleMarker key={loc.id} center={[loc.lat,loc.lng]} radius={loc.id===selectedId?11:8} pathOptions={{color:'#fff',weight:2,fillColor:c.color,fillOpacity:.95}} eventHandlers={{click:()=>{onSelect(loc.id);map.flyTo([loc.lat,loc.lng],7,{duration:.5});}}}>
-      <Popup><div style={{minWidth:150}}><strong>{loc.city}</strong><br/>AQI {aqi} · {c.label}<br/><small>{getAQI(loc).dominant} dominant</small><br/><small>DEMO · {loc.updated}</small></div></Popup>
+  return <>{points.map(({ station, aqi }) => {
+    const c = category(aqi.value);
+    return <CircleMarker key={station.id} center={[station.lat, station.lng]} radius={station.id === selectedId ? 11 : 8} pathOptions={{ color: '#fff', weight: 2, fillColor: c.color, fillOpacity: .95 }} eventHandlers={{ click: () => { onSelect(station.id); map.flyTo([station.lat, station.lng], 7, { duration: .5 }); } }}>
+      <Popup><div style={{ minWidth: 160 }}><strong>{station.city}</strong><br />AQI {aqi.value} · {c.label}<br /><small>{aqi.dominant ? POLLUTANTS.find(p => p.key === aqi.dominant)?.name : '—'} dominant</small><br /><small>{station.sourceKind} · {station.updated}</small></div></Popup>
     </CircleMarker>;
   })}</>;
 }
-function AirMap({ locations, selectedId, onSelect }: {locations:LocationData[];selectedId:string;onSelect:(id:string)=>void}) {
-  return <div className="h-[360px] overflow-hidden rounded-xl border border-[#e3ece8]"><MapContainer center={[22.8,79.2]} zoom={5} scrollWheelZoom className="h-full w-full">
+
+function AirMap({ points, selectedId, onSelect }: { points: StationComputed[]; selectedId: string; onSelect: (id: string) => void }) {
+  return <div className="h-[380px] overflow-hidden rounded-xl border border-[#e3ece8]"><MapContainer center={[22.8, 79.2]} zoom={5} scrollWheelZoom className="h-full w-full">
     <TileLayer attribution='&copy; OpenStreetMap contributors' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-    <MapContents locations={locations} selectedId={selectedId} onSelect={onSelect}/>
+    <MapContents points={points} selectedId={selectedId} onSelect={onSelect} />
   </MapContainer></div>;
 }
-function Metric({label,value,unit,icon:Icon,tone='#07845b',sub}:{label:string;value:string|number;unit?:string;icon:typeof Activity;tone?:string;sub?:string}) {
-  return <Card className="p-4"><div className="flex items-start justify-between"><span className="text-xs font-semibold uppercase tracking-wider text-[#849991]">{label}</span><span className="rounded-lg p-2" style={{background:`${tone}13`,color:tone}}><Icon size={17}/></span></div><div className="mt-3 flex items-baseline gap-1.5"><span className="text-2xl font-bold tracking-tight text-[#193a31]">{value}</span>{unit&&<span className="text-xs text-[#8aa097]">{unit}</span>}</div>{sub&&<p className="mt-1 text-xs text-[#81978f]">{sub}</p>}</Card>;
+
+function Metric({ label, value, unit, icon: Icon, tone = '#07845b', sub }: { label: string; value: string | number; unit?: string; icon: typeof Activity; tone?: string; sub?: string }) {
+  return <Card className="p-4"><div className="flex items-start justify-between"><span className="text-xs font-semibold uppercase tracking-wider text-[#849991]">{label}</span><span className="rounded-lg p-2" style={{ background: `${tone}13`, color: tone }}><Icon size={17} /></span></div><div className="mt-3 flex items-baseline gap-1.5"><span className="text-2xl font-bold tracking-tight text-[#193a31]">{value}</span>{unit && <span className="text-xs text-[#8aa097]">{unit}</span>}</div>{sub && <p className="mt-1 text-xs text-[#81978f]">{sub}</p>}</Card>;
 }
 
+function ConfidenceBar({ confidence }: { confidence: number }) {
+  const pct = Math.round(confidence * 100);
+  const tone = pct >= 70 ? '#159767' : pct >= 50 ? '#b8860b' : '#c2542d';
+  return <div><div className="flex items-center justify-between text-xs"><span className="font-semibold text-[#4b6b5e]">Data confidence</span><span style={{ color: tone }} className="font-bold">{pct}%</span></div><div className="mt-1.5 h-2 overflow-hidden rounded-full bg-[#edf3ef]"><div className="h-full rounded-full" style={{ width: `${pct}%`, background: tone }} /></div><p className="mt-1 text-[10px] leading-4 text-[#91a49b]">Higher when modelled data covers the same season.</p></div>;
+}
+
+const emptyAlertHistory: GeneratedAlert[] = [];
+
 export default function App() {
-  const [view,setView] = useState<View>('overview');
-  const [collapsed,setCollapsed] = useState(false);
-  const [search,setSearch] = useState('');
-  const [selectedId,setSelectedId] = useState('DEL-01');
-  const [locations, setLocations] = useState<LocationData[]>(seedLocations);
-  const [dataModes, setDataModes] = useState<Record<string, 'DEMO' | 'MODEL'>>({});
-  const [loadingLive, setLoadingLive] = useState(false);
-  const [alerts,setAlerts] = useState<AlertRecord[]>([
-    {id:1,location:'New Delhi',threshold:100,enabled:true,pollutant:'AQI'},
-    {id:2,location:'Kolkata',threshold:150,enabled:true,pollutant:'PM2.5'},
+  const [view, setView] = useState<View>('explorer');
+  const [collapsed, setCollapsed] = useState(false);
+  const [search, setSearch] = useState('');
+  const [stateFilter, setStateFilter] = useState('All states');
+  const [categoryFilter, setCategoryFilter] = useState('All categories');
+  const [selectedId, setSelectedId] = useState('DL-ANI');
+  const [alertRules, setAlertRules] = useState<{ id: number; stationId: string; threshold: number; enabled: boolean }[]>([
+    { id: 1, stationId: 'DL-ANI', threshold: 150, enabled: true },
   ]);
-  const [alertLocation,setAlertLocation] = useState('New Delhi');
-  const [alertThreshold,setAlertThreshold] = useState(100);
-  const [alertPollutant,setAlertPollutant] = useState('AQI');
-  const [toast,setToast] = useState('');
-  const [filter,setFilter] = useState('All locations');
-  const [showProfile,setShowProfile] = useState(false);
-  const [showNotifications,setShowNotifications] = useState(false);
-  const selected = locations.find(l=>l.id===selectedId) ?? locations[0];
-  const pollutantRows = [
-    { name: 'PM2.5', value: selected.pm25, unit: 'µg/m³', scale: 250 },
-    { name: 'PM10', value: selected.pm10, unit: 'µg/m³', scale: 600 },
-    { name: 'NO₂', value: selected.no2, unit: 'µg/m³', scale: 800 },
-    { name: 'SO₂', value: selected.so2, unit: 'µg/m³', scale: 2000 },
-    { name: 'CO', value: selected.co, unit: 'mg/m³', scale: 50 },
-    { name: 'O₃', value: selected.o3, unit: 'µg/m³', scale: 1000 },
-  ];
-  const currentAQI = getAQI(selected);
-  const currentCategory = category(currentAQI.value);
-  const selectedDataMode = dataModes[selected.id] ?? 'DEMO';
-  const filteredLocations = useMemo(()=>locations.filter(l=>{
-    const q=search.toLowerCase();
-    const matches = !q || `${l.city} ${l.state} ${l.id}`.toLowerCase().includes(q);
-    const aqi=getAQI(l).value;
-    const severity = filter==='All locations' || (filter==='Elevated AQI'&&aqi>100) || (filter==='Good/Satisfactory'&&aqi<=100);
-    return matches&&severity;
-  }),[locations,search,filter]);
-  const alertCount = alerts.filter(a=>a.enabled && locations.some(l=>l.city===a.location && (a.pollutant==='AQI'?getAQI(l).value:l.pm25)>=a.threshold)).length;
-  const notify = (msg:string)=>{setToast(msg);window.setTimeout(()=>setToast(''),3200);};
-  const refreshSelectedData = async () => {
-    setLoadingLive(true);
-    try {
-      const airUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${selected.lat}&longitude=${selected.lng}&hourly=pm2_5,pm10,nitrogen_dioxide,sulphur_dioxide,carbon_monoxide,ozone&past_days=1&forecast_days=1&timezone=Asia%2FKolkata`;
-      const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${selected.lat}&longitude=${selected.lng}&current=temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m&timezone=Asia%2FKolkata`;
-      const [airResponse, weatherResponse] = await Promise.all([fetch(airUrl), fetch(weatherUrl)]);
-      if (!airResponse.ok || !weatherResponse.ok) throw new Error('Provider request failed');
-      const air = await airResponse.json() as {
-        hourly?: { time?: string[]; pm2_5?: (number|null)[]; pm10?: (number|null)[]; nitrogen_dioxide?: (number|null)[]; sulphur_dioxide?: (number|null)[]; carbon_monoxide?: (number|null)[]; ozone?: (number|null)[] };
-      };
-      const weather = await weatherResponse.json() as { current?: { time?: string; temperature_2m?: number; relative_humidity_2m?: number; wind_speed_10m?: number; wind_direction_10m?: number } };
-      const hourly = air.hourly;
-      if (!hourly?.time?.length || !weather.current) throw new Error('Provider returned incomplete data');
-      const localHour = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Kolkata' }).replace(' ', 'T').slice(0, 13);
-      let index = hourly.time.findIndex(t => t.slice(0, 13) === localHour);
-      if (index < 0) index = hourly.time.reduce((best, t, i) => t.slice(0, 13) <= localHour ? i : best, -1);
-      if (index < 7) throw new Error('Not enough hourly history to calculate averaging windows');
-      const average = (values: (number|null)[] | undefined, count: number, divisor = 1) => {
-        if (!values) throw new Error('A required pollutant is unavailable');
-        const sample = values.slice(Math.max(0, index - count + 1), index + 1).filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
-        if (sample.length < (count === 24 ? 16 : 8)) throw new Error('Insufficient valid pollutant observations for the required averaging window');
-        return sample.reduce((sum, value) => sum + value, 0) / sample.length / divisor;
-      };
-      const updated: LocationData = {
-        ...selected,
-        pm25: average(hourly.pm2_5, 24),
-        pm10: average(hourly.pm10, 24),
-        no2: average(hourly.nitrogen_dioxide, 24),
-        so2: average(hourly.sulphur_dioxide, 24),
-        co: average(hourly.carbon_monoxide, 8, 1000),
-        o3: average(hourly.ozone, 8),
-        temp: weather.current.temperature_2m ?? selected.temp,
-        humidity: weather.current.relative_humidity_2m ?? selected.humidity,
-        wind: weather.current.wind_speed_10m ?? selected.wind,
-        windDir: typeof weather.current.wind_direction_10m === 'number' ? `${Math.round(weather.current.wind_direction_10m)}°` : selected.windDir,
-        updated: `${hourly.time[index]} · Asia/Kolkata`,
-      };
-      setLocations(prev => prev.map(loc => loc.id === selected.id ? updated : loc));
-      setDataModes(prev => ({ ...prev, [selected.id]: 'MODEL' }));
-      notify('Modelled air-quality and weather data refreshed. This is not a ground-station observation.');
-    } catch {
-      notify('Provider unavailable or data incomplete. Keeping clearly labelled demo values.');
-    } finally {
-      setLoadingLive(false);
+  const [alertHistory, setAlertHistory] = useState<GeneratedAlert[]>(emptyAlertHistory);
+  const [alertThreshold, setAlertThreshold] = useState(150);
+  const [toast, setToast] = useState('');
+  const [showProfile, setShowProfile] = useState(false);
+  const [lastRun, setLastRun] = useState<string | null>(null);
+
+  const notify = (msg: string) => { setToast(msg); window.setTimeout(() => setToast(''), 3600); };
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return COMPUTED.filter(({ station, aqi }) => {
+      const matchesQ = !q || [station.city, station.district, station.state, station.station, station.id].join(' ').toLowerCase().includes(q);
+      const matchesState = stateFilter === 'All states' || station.state === stateFilter;
+      const matchesCat = categoryFilter === 'All categories' || category(aqi.value).label === categoryFilter;
+      return matchesQ && matchesState && matchesCat;
+    });
+  }, [search, stateFilter, categoryFilter]);
+
+  const selected = findStation(selectedId) ?? COMPUTED[0];
+  const { station: sel, aqi: selAqi, baseline: selBaseline } = selected;
+  const selCategory = category(selAqi.value);
+  const selMode = sel.sourceKind;
+
+  const selAnomaly = useMemo(() => detectAnomaly(selAqi.value, selBaseline, CURRENT_MONTH, selMode), [selAqi, selBaseline, selMode]);
+  const selCauses = useMemo(() => inferCauses(sel.current, selAqi, sel.temp, sel.wind, sel.humidity), [sel, selAqi]);
+  const seasonal = selBaseline.monthly.find((m) => m.month === CURRENT_MONTH) ?? null;
+
+  const monthlyChart = selBaseline.monthly.map((m) => ({
+    month: monthLabel(m.month),
+    median: m.medianAqi,
+    p25: m.p25,
+    p75: m.p75,
+    current: m.month === CURRENT_MONTH ? selAqi.value : null,
+  }));
+
+  const pollutantRows = POLLUTANTS.filter((p) => typeof sel.current[p.key] === 'number').map((p) => {
+    const concentration = sel.current[p.key] as number;
+    return { ...p, concentration, index: subIndex(concentration, p.key), scale: p.key === 'co' ? 50 : p.key === 'so2' ? 2000 : p.key === 'nh3' ? 2400 : p.key === 'o3' ? 1000 : p.key === 'no2' ? 800 : p.key === 'pm10' ? 600 : 500 };
+  });
+
+  const runDetection = () => {
+    const created: GeneratedAlert[] = [];
+    for (const { station, aqi, baseline } of COMPUTED) {
+      const anomaly = detectAnomaly(aqi.value, baseline, CURRENT_MONTH, station.sourceKind);
+      const rule = alertRules.find((r) => r.stationId === station.id && r.enabled);
+      if (!anomaly.isAnomalous && !rule) continue;
+      if (rule && aqi.value < rule.threshold && !anomaly.isAnomalous) continue;
+      const severity = severityFor(aqi.value, anomaly);
+      if (severity === 'Watch' && !anomaly.healthFlag && !anomaly.deviationFlag) continue;
+      const causes = inferCauses(station.current, aqi, station.temp, station.wind, station.humidity);
+      created.push(generateAlert(station.id, `${station.city} — ${station.station}`, aqi, anomaly, severity, causes));
     }
+    created.sort((a, b) => b.aqi - a.aqi);
+    setAlertHistory((prev) => [...created, ...prev.filter((p) => !created.some((c) => c.locationId === p.locationId))].slice(0, 40));
+    setLastRun(new Date().toLocaleTimeString());
+    notify(created.length ? `${created.length} anomaly alert(s) generated.` : 'No anomalies above thresholds right now.');
   };
-  const addAlert = ()=>{
-    if(!Number.isInteger(Number(alertThreshold))||Number(alertThreshold)<1||Number(alertThreshold)>500){notify('Enter an integer threshold from 1 to 500.');return;}
-    setAlerts(prev=>[...prev,{id:Date.now(),location:alertLocation,threshold:Number(alertThreshold),enabled:true,pollutant:alertPollutant}]);
-    notify('Alert rule saved for '+alertLocation+'.');
+
+  const exportCSV = () => {
+    const rows = [['Station ID', 'City', 'District', 'State', 'Station', 'AQI', 'Category', 'Dominant', 'Median AQI (12mo)', 'Seasonal median (Sep)', 'Mode', 'Source', 'Timestamp'],
+    ...COMPUTED.map(({ station, aqi, baseline }) => {
+      const sep = baseline.monthly.find((m) => m.month === CURRENT_MONTH);
+      return [station.id, station.city, station.district, station.state, station.station, aqi.value, category(aqi.value).label, aqi.dominant ?? '—', baseline.medianAqi, sep?.medianAqi ?? '—', station.sourceKind, station.sourceDetail, station.updated];
+    })];
+    const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
+    const a = document.createElement('a'); a.href = url; a.download = 'airpulse-all-india-explorer.csv'; a.click(); URL.revokeObjectURL(url);
+    notify('Explorer CSV exported with mode and source labels.');
   };
-  const exportPassport = ()=>{
-    const payload={product:'AirPulse AI',dataMode:selectedDataMode,source:selectedDataMode==='MODEL'?'Open-Meteo modelled grid estimate':'Illustrative demo data',exportedAt:new Date().toISOString(),location:selected,aqi:currentAQI.value,category:currentCategory.label,dominantPollutant:currentAQI.dominant,standard:'CPCB India AQI breakpoint method',note:selectedDataMode==='MODEL'?'Modelled gridded estimate, not an official ground-station measurement.':'Illustrative demo observation; not a live monitoring record.'};
-    const url=URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:'application/json'}));
-    const a=document.createElement('a');a.href=url;a.download=`airpulse-${selected.id}-evidence-passport.json`;a.click();URL.revokeObjectURL(url);notify('Evidence Passport exported.');
-  };
-  const exportCSV = ()=>{
-    const rows=[['Location','State','AQI estimate','Category','Dominant pollutant','PM2.5','PM10','Mode','Source','Timestamp'],...locations.map(l=>[l.city,l.state,getAQI(l).value,category(getAQI(l).value).label,getAQI(l).dominant,l.pm25,l.pm10,dataModes[l.id]??'DEMO',dataModes[l.id]==='MODEL'?'Open-Meteo model estimate':'Illustrative sample data',l.updated])];
-    const csv=rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
-    const url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8;'}));const a=document.createElement('a');a.href=url;a.download='airpulse-observations-demo.csv';a.click();URL.revokeObjectURL(url);notify('CSV exported with DEMO labels.');
-  };
-  const pageTitle = navItems.find(n=>n.id===view)?.label ?? 'Overview';
+
+  const activeAlerts = alertHistory.filter((a) => resolveStatus(a, findStation(a.locationId)?.aqi.value ?? a.aqi, a.baselineMedian) === 'Active');
+
+  const openStation = (id: string, next: View = 'investigate') => { setSelectedId(id); setView(next); };
 
   return <div className="flex min-h-screen bg-[#f4f7f6] text-[#203b33]">
-    <aside className={`${collapsed?'w-[76px]':'w-[258px]'} fixed inset-y-0 left-0 z-30 flex flex-col border-r border-[#e4ece8] bg-white transition-all duration-200`}>
+    <aside className={`${collapsed ? 'w-[76px]' : 'w-[258px]'} fixed inset-y-0 left-0 z-30 flex flex-col border-r border-[#e4ece8] bg-white transition-all duration-200`}>
       <div className="flex h-[76px] items-center gap-3 border-b border-[#edf2ef] px-4">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#123d32] text-white"><Wind size={22}/></div>
-        {!collapsed&&<div className="min-w-0"><div className="text-[17px] font-bold tracking-tight text-[#183c32]">AirPulse AI</div><div className="text-[11px] text-[#83a095]">Urban Air Intelligence</div></div>}
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#123d32] text-white"><Wind size={22} /></div>
+        {!collapsed && <div className="min-w-0"><div className="text-[17px] font-bold tracking-tight text-[#183c32]">AirPulse AI</div><div className="text-[11px] text-[#83a095]">Urban Air Intelligence</div></div>}
       </div>
       <div className="flex-1 overflow-y-auto px-3 py-5">
-        {(['COMMAND','INTELLIGENCE','EVIDENCE','SYSTEM'] as const).map(group=><div key={group} className="mb-5">
-          {!collapsed&&<div className="mb-2 px-3 text-[10px] font-bold tracking-[.16em] text-[#a4b8b0]">{group}</div>}
-          {navItems.filter(n=>n.group===group).map(item=>{const Icon=item.icon;return <button key={item.id} onClick={()=>setView(item.id)} title={item.label} className={`mb-1 flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm transition ${view===item.id?'bg-[#173b32] font-semibold text-white shadow-sm':'text-[#49675c] hover:bg-[#f0f6f3]'}`}><Icon size={18} className={view===item.id?'text-[#12b981]':'text-[#648278]'}/>{!collapsed&&<span className="flex-1">{item.label}</span>}{!collapsed&&item.id==='alerts'&&<span className="rounded-full bg-[#fff0f0] px-2 py-0.5 text-[10px] font-bold text-[#db555b]">{alerts.length}</span>}</button>;})}
+        {(['COMMAND', 'INTELLIGENCE', 'SYSTEM'] as const).map((group) => <div key={group} className="mb-5">
+          {!collapsed && <div className="mb-2 px-3 text-[10px] font-bold tracking-[.16em] text-[#a4b8b0]">{group}</div>}
+          {navItems.filter((n) => n.group === group).map((item) => { const Icon = item.icon; return <button key={item.id} onClick={() => setView(item.id)} title={item.label} className={`mb-1 flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm transition ${view === item.id ? 'bg-[#173b32] font-semibold text-white shadow-sm' : 'text-[#49675c] hover:bg-[#f0f6f3]'}`}><Icon size={18} className={view === item.id ? 'text-[#12b981]' : 'text-[#648278]'} />{!collapsed && <span className="flex-1">{item.label}</span>}{!collapsed && item.id === 'alerts' && activeAlerts.length > 0 && <span className="rounded-full bg-[#fff0f0] px-2 py-0.5 text-[10px] font-bold text-[#db555b]">{activeAlerts.length}</span>}</button>; })}
         </div>)}
       </div>
-      <div className="border-t border-[#edf2ef] p-3"><button onClick={()=>setCollapsed(v=>!v)} className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-3 text-sm text-[#668177] hover:bg-[#f3f7f5]"><Menu size={17}/>{!collapsed&&'Collapse sidebar'}</button>{!collapsed&&<div className="mt-2 rounded-xl bg-[#f4f8f6] p-3"><div className="text-[10px] font-semibold uppercase tracking-wider text-[#89a198]">Data mode</div><div className="mt-1 flex items-center gap-2 text-xs font-semibold text-[#a56b14]"><span className="h-2 w-2 rounded-full bg-[#e7a63c]"/> DEMO DATA</div><p className="mt-1 text-[10px] leading-4 text-[#91a49d]">Sample values are illustrative, not live readings.</p></div>}</div>
+      <div className="border-t border-[#edf2ef] p-3"><button onClick={() => setCollapsed((v) => !v)} className="flex w-full items-center justify-center gap-2 rounded-lg px-3 py-3 text-sm text-[#668177] hover:bg-[#f3f7f5]"><Menu size={17} />{!collapsed && 'Collapse sidebar'}</button>{!collapsed && <div className="mt-2 rounded-xl bg-[#f4f8f6] p-3"><div className="text-[10px] font-semibold uppercase tracking-wider text-[#89a198]">Coverage</div><div className="mt-1 flex items-center gap-2 text-xs font-semibold text-[#3c6556]"><span className="h-2 w-2 rounded-full bg-[#12b981]" /> {COMPUTED.length} stations online</div><p className="mt-1 text-[10px] leading-4 text-[#91a49d]">Station-based coverage across {STATES.length} states.</p></div>}</div>
     </aside>
 
-    <main className={`min-w-0 flex-1 transition-all ${collapsed?'ml-[76px]':'ml-[258px]'}`}>
+    <main className={`min-w-0 flex-1 transition-all ${collapsed ? 'ml-[76px]' : 'ml-[258px]'}`}>
       <header className="sticky top-0 z-20 flex min-h-[76px] flex-wrap items-center justify-between gap-3 border-b border-[#e4ece8] bg-white/95 px-5 py-3 backdrop-blur md:px-8">
-        <div className="flex min-w-[220px] flex-1 items-center gap-3"><div className="relative w-full max-w-[460px]"><Search className="absolute left-3 top-1/2 -translate-y-1/2 text-[#88a198]" size={17}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search cities, states, monitoring locations..." className="w-full rounded-xl border border-[#dce8e2] bg-[#fcfefd] py-2.5 pl-10 pr-3 text-sm outline-none focus:border-[#0b9466] focus:ring-2 focus:ring-[#0b9466]/10"/></div></div>
+        <div className="flex min-w-[240px] flex-1 items-center gap-3"><div className="relative w-full max-w-[520px]"><Search className="absolute left-3 top-1/2 -translate-y-1/2 text-[#88a198]" size={17} /><input value={search} onChange={(e) => { setSearch(e.target.value); setView('explorer'); }} placeholder="Search state, city, town, district or station…" className="w-full rounded-xl border border-[#dce8e2] bg-[#fcfefd] py-2.5 pl-10 pr-3 text-sm outline-none focus:border-[#0b9466] focus:ring-2 focus:ring-[#0b9466]/10" /></div></div>
         <div className="flex items-center gap-2">
-          <Badge color={selectedDataMode === 'MODEL' ? '#087443' : '#b47718'} bg={selectedDataMode === 'MODEL' ? '#e5f7ee' : '#fff5df'}>{selectedDataMode === 'MODEL' ? 'MODEL DATA' : 'DEMO MODE'}</Badge>
-          <div className="relative"><button onClick={()=>setShowNotifications(v=>!v)} className="relative rounded-xl border border-[#e1ebe6] p-2.5 text-[#527166] hover:bg-[#f4f8f6]"><Bell size={17}/>{alertCount>0&&<span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-[#e35a5e]"/>}</button>{showNotifications&&<div className="absolute right-0 top-12 z-50 w-72 rounded-xl border border-[#e0eae5] bg-white p-4 shadow-xl"><div className="font-semibold">Notifications</div><p className="mt-2 text-sm text-[#698278]">{alertCount?`${alertCount} enabled alert rule(s) currently meet their threshold in demo data.`:'No alert rules currently triggered.'}</p><button className="mt-3 text-xs font-semibold text-[#087c55]" onClick={()=>{setView('alerts');setShowNotifications(false)}}>Review alerts →</button></div>}</div>
-          <button onClick={()=>setShowProfile(v=>!v)} className="flex items-center gap-2 rounded-xl border border-[#e1ebe6] px-3 py-2 text-sm text-[#49675c]"><span className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#e6f4ed] text-[#087c55]"><Activity size={15}/></span><span className="hidden text-left sm:block"><span className="block text-xs font-semibold">Air Quality Analyst</span><span className="block text-[10px] text-[#8ca198]">Local workspace</span></span><ChevronDown size={14}/></button>
-          {showProfile&&<div className="absolute right-5 top-[66px] z-50 rounded-xl border border-[#e0eae5] bg-white p-3 shadow-xl"><button onClick={()=>{setView('settings');setShowProfile(false)}} className="text-sm">Workspace settings</button></div>}
+          <Badge {...modeBadgeColors(selMode)}>{selMode === 'MODEL' ? 'MODEL' : 'OBSERVED'} DATA</Badge>
+          <div className="relative"><button onClick={() => setView('alerts')} className="relative rounded-xl border border-[#e1ebe6] p-2.5 text-[#527166] hover:bg-[#f4f8f6]" title="Alerts"><Bell size={17} />{activeAlerts.length > 0 && <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-[#e35a5e]" />}</button></div>
+          <button onClick={() => setShowProfile((v) => !v)} className="flex items-center gap-2 rounded-xl border border-[#e1ebe6] px-3 py-2 text-sm text-[#49675c]"><span className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#e6f4ed] text-[#087c55]"><Activity size={15} /></span><span className="hidden text-left sm:block"><span className="block text-xs font-semibold">Air Quality Analyst</span><span className="block text-[10px] text-[#8ca198]">Local workspace</span></span><ChevronDown size={14} /></button>
+          {showProfile && <div className="absolute right-5 top-[66px] z-50 rounded-xl border border-[#e0eae5] bg-white p-3 shadow-xl"><button onClick={() => { setView('settings'); setShowProfile(false); }} className="text-sm">Workspace settings</button></div>}
         </div>
       </header>
 
       <div className="mx-auto max-w-[1600px] p-4 md:p-7">
-        {view==='overview'&&<><SectionTitle title="Air Quality Overview" subtitle="Urban air-quality monitoring · CPCB India AQI framework" action={<button onClick={refreshSelectedData} disabled={loadingLive} className="btn-outline flex items-center gap-2 rounded-xl border border-[#dce8e2] bg-white px-3 py-2 text-xs font-semibold text-[#3c6556] disabled:opacity-60"><RefreshCw size={14} className={loadingLive ? 'animate-spin' : ''}/>{loadingLive ? 'Fetching…' : `Refresh ${selected.city}`}</button>}/>
-          <div className="mb-4 rounded-xl border border-[#f1dfb6] bg-[#fff9eb] px-4 py-3 text-xs leading-5 text-[#87631d]"><Info size={15} className="mr-2 inline"/> DATA NOTICE: locations without a successful refresh use illustrative demo values. Refresh fetches modelled Open-Meteo air-quality and weather estimates for the selected location; these are not official ground-station measurements.</div>
-          <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
-            <Card className="col-span-2 overflow-hidden p-5 sm:col-span-1" ><div className="flex items-center justify-between"><span className="text-xs font-semibold uppercase tracking-wider text-[#83988f]">Selected location AQI</span><Gauge size={18} color={currentCategory.color}/></div><div className="mt-3 flex items-end gap-3"><div className="text-5xl font-bold tracking-tight" style={{color:currentCategory.color}}>{currentAQI.value}</div><div className="pb-1"><Badge color={currentCategory.color} bg={currentCategory.bg}>{currentCategory.label}</Badge><div className="mt-1 text-xs text-[#8ba097]">{selected.city}</div></div></div><div className="mt-4 h-2 overflow-hidden rounded-full bg-[#edf2ef]"><div className="h-full rounded-full" style={{width:`${Math.min(100,currentAQI.value/5)}%`,background:currentCategory.color}}/></div><p className="mt-3 text-xs leading-5 text-[#71887e]">{currentCategory.text}</p></Card>
-            <Metric label="Dominant pollutant" value={currentAQI.dominant} unit={currentAQI.dominant==='CO'?'mg/m³':'µg/m³'} icon={Activity} sub="Highest calculated sub-index"/>
-            <Metric label="Monitored locations" value={locations.length} icon={MapPin} sub="Sample locations across India"/>
-            <Metric label="Alert rules" value={alerts.length} icon={Bell} tone="#d99a2b" sub={`${alertCount} currently meet thresholds in demo data`}/>
-          </div>
-          <div className="mt-5 grid gap-5 xl:grid-cols-[1.45fr_1fr]">
-            <Card className="p-4 md:p-5"><div className="mb-4 flex flex-wrap items-center justify-between gap-2"><div><h3 className="font-bold text-[#24463a]">Pollution hotspot map</h3><p className="mt-1 text-xs text-[#8aa096]">Select a marker to inspect a location · OpenStreetMap</p></div><button onClick={()=>setView('map')} className="text-xs font-semibold text-[#07865b]">Open full map <ArrowUpRight size={13} className="inline"/></button></div><AirMap locations={locations} selectedId={selectedId} onSelect={setSelectedId}/><div className="mt-3 flex flex-wrap gap-3 text-[10px] text-[#81978e]">{[{l:'Good',c:'#16a36a'},{l:'Satisfactory',c:'#82b735'},{l:'Moderate',c:'#e9b329'},{l:'Poor',c:'#ef8734'},{l:'Very Poor / Severe',c:'#e84e55'}].map(x=><span key={x.l} className="flex items-center gap-1.5"><i className="h-2 w-2 rounded-full" style={{background:x.c}}/>{x.l}</span>)}</div></Card>
-            <Card className="p-4 md:p-5"><div className="mb-4"><h3 className="font-bold text-[#24463a]">AQI trend · selected location</h3><p className="mt-1 text-xs text-[#8aa096]">Illustrative historical sample · not live observations</p></div><div className="h-[240px]"><ResponsiveContainer width="100%" height="100%"><AreaChart data={history}><defs><linearGradient id="aqiFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#13a875" stopOpacity={0.25}/><stop offset="95%" stopColor="#13a875" stopOpacity={0.02}/></linearGradient></defs><CartesianGrid stroke="#edf2ef" strokeDasharray="3 3" vertical={false}/><XAxis dataKey="time" tick={{fontSize:10,fill:'#8aa096'}} axisLine={false} tickLine={false}/><YAxis tick={{fontSize:10,fill:'#8aa096'}} axisLine={false} tickLine={false}/><Tooltip/><Area type="monotone" dataKey="aqi" stroke="#0b9868" fill="url(#aqiFill)" strokeWidth={2.5} name="AQI"/></AreaChart></ResponsiveContainer></div><div className="mt-3 rounded-xl bg-[#f5f9f7] p-3"><div className="flex items-center gap-2 text-xs font-semibold text-[#42695a]"><Sparkles size={15} className="text-[#0b9868]"/> Data-led insight</div><p className="mt-1 text-xs leading-5 text-[#789087]">Compare hourly changes with weather and nearby readings before attributing a cause. This demo chart is illustrative.</p></div></Card>
-          </div>
-          <Card className="mt-5 overflow-hidden"><div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#edf2ef] p-4"><div><h3 className="font-bold text-[#24463a]">Location readings</h3><p className="mt-1 text-xs text-[#8aa096]">AQI calculated from available pollutant values</p></div><select value={filter} onChange={e=>setFilter(e.target.value)} className="rounded-lg border border-[#dce8e2] bg-white px-3 py-2 text-xs text-[#4d6c5e]"><option>All locations</option><option>Elevated AQI</option><option>Good/Satisfactory</option></select></div><div className="overflow-x-auto"><table className="w-full min-w-[650px] text-left text-sm"><thead className="bg-[#f8faf9] text-[10px] uppercase tracking-wider text-[#91a49b]"><tr><th className="px-4 py-3">Location</th><th className="px-4 py-3">AQI</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Dominant</th><th className="px-4 py-3">PM2.5</th><th className="px-4 py-3">Data status</th></tr></thead><tbody>{filteredLocations.map(l=>{const aq=getAQI(l);const cat=category(aq.value);return <tr key={l.id} onClick={()=>{setSelectedId(l.id);setView('investigate')}} className="cursor-pointer border-t border-[#eff3f1] hover:bg-[#f8fbf9]"><td className="px-4 py-3"><div className="font-semibold text-[#315347]">{l.city}</div><div className="text-xs text-[#95a79f]">{l.state} · {l.id}</div></td><td className="px-4 py-3 font-bold" style={{color:cat.color}}>{aq.value}</td><td className="px-4 py-3"><Badge color={cat.color} bg={cat.bg}>{cat.label}</Badge></td><td className="px-4 py-3 text-[#557367]">{aq.dominant}</td><td className="px-4 py-3 text-[#557367]">{l.pm25} µg/m³</td><td className="px-4 py-3"><Badge color={dataModes[l.id] === 'MODEL' ? '#087443' : '#b47718'} bg={dataModes[l.id] === 'MODEL' ? '#e5f7ee' : '#fff5df'}>{dataModes[l.id] ?? 'DEMO'}</Badge></td></tr>})}</tbody></table></div></Card>
+        {/* ---------------- EXPLORER ---------------- */}
+        {view === 'explorer' && <>
+          <SectionTitle title="All-India City & Station Explorer" subtitle="Search by state, city, town, district or monitoring station"
+            action={<button onClick={exportCSV} className="flex items-center gap-2 rounded-xl border border-[#dce8e2] bg-white px-3 py-2 text-xs font-semibold text-[#3c6556]"><Download size={14} /> Export CSV</button>} />
+          <div className="mb-4 rounded-xl border border-[#d7e8f4] bg-[#eef6fc] px-4 py-3 text-xs leading-5 text-[#2b5c7e]"><Info size={15} className="mr-2 inline" />Official reference: <strong>CPCB All India AQI Dashboard</strong> (airquality.cpcb.gov.in). Coverage is based on <strong>CAAQMS monitoring stations</strong>, not every town or neighbourhood. {DATA_NOTICE.coverage}</div>
+          <Card className="mb-4 p-4">
+            <div className="flex flex-wrap items-center gap-3">
+              <select value={stateFilter} onChange={(e) => setStateFilter(e.target.value)} className="rounded-lg border border-[#dce8e2] bg-white px-3 py-2 text-xs text-[#4d6c5e]"><option>All states</option>{STATES.map((s) => <option key={s}>{s}</option>)}</select>
+              <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} className="rounded-lg border border-[#dce8e2] bg-white px-3 py-2 text-xs text-[#4d6c5e]">{['All categories', 'Good', 'Satisfactory', 'Moderate', 'Poor', 'Very Poor', 'Severe'].map((c) => <option key={c}>{c}</option>)}</select>
+              <span className="text-xs text-[#8aa096]">{filtered.length} of {COMPUTED.length} stations with data</span>
+            </div>
+          </Card>
+          <Card className="overflow-hidden">
+            <div className="overflow-x-auto"><table className="w-full min-w-[820px] text-left text-sm">
+              <thead className="bg-[#f8faf9] text-[10px] uppercase tracking-wider text-[#91a49b]"><tr><th className="px-4 py-3">Station</th><th className="px-4 py-3">Latest AQI</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Dominant</th><th className="px-4 py-3">vs. baseline</th><th className="px-4 py-3">Timestamp</th><th className="px-4 py-3">Source</th></tr></thead>
+              <tbody>{filtered.map(({ station, aqi, baseline }) => {
+                const cat = category(aqi.value);
+                const sep = baseline.monthly.find((m) => m.month === CURRENT_MONTH);
+                const ratio = sep ? aqi.value / sep.medianAqi : null;
+                return <tr key={station.id} onClick={() => openStation(station.id)} className="cursor-pointer border-t border-[#eff3f1] hover:bg-[#f8fbf9]">
+                  <td className="px-4 py-3"><div className="font-semibold text-[#315347]">{station.city}</div><div className="text-xs text-[#95a79f]">{station.district}, {station.state} · {station.station}</div></td>
+                  <td className="px-4 py-3 font-bold" style={{ color: cat.color }}>{aqi.value}</td>
+                  <td className="px-4 py-3"><Badge color={cat.color} bg={cat.bg}>{cat.label}</Badge></td>
+                  <td className="px-4 py-3 text-[#557367]">{aqi.dominant ? POLLUTANTS.find((p) => p.key === aqi.dominant)?.name : '—'}</td>
+                  <td className="px-4 py-3 text-xs">{ratio !== null ? <span style={{ color: ratio >= 1.5 ? '#c2542d' : ratio >= 1.1 ? '#b8860b' : '#159767' }}>{Math.round((ratio - 1) * 100) >= 0 ? '+' : ''}{Math.round((ratio - 1) * 100)}% vs Sep median {sep?.medianAqi}</span> : '—'}</td>
+                  <td className="px-4 py-3 text-xs text-[#81978f]">{station.updated}</td>
+                  <td className="px-4 py-3"><Badge {...modeBadgeColors(station.sourceKind)}>{station.sourceKind === 'MODEL' ? 'Open-Meteo model' : 'Station record'}</Badge></td>
+                </tr>;
+              })}</tbody>
+            </table></div>
+          </Card>
         </>}
 
-        {view==='map'&&<><SectionTitle title="Live Map" subtitle="Geospatial view of available monitoring locations" action={<select value={filter} onChange={e=>setFilter(e.target.value)} className="rounded-lg border border-[#dce8e2] bg-white px-3 py-2 text-xs"><option>All locations</option><option>Elevated AQI</option><option>Good/Satisfactory</option></select>}/><div className="mb-4 rounded-xl border border-[#f1dfb6] bg-[#fff9eb] p-3 text-xs text-[#87631d]">DEMO MAP: markers show illustrative sample readings, not verified live station feeds.</div><div className="grid gap-5 xl:grid-cols-[1.6fr_1fr]"><Card className="p-4"><AirMap locations={filteredLocations} selectedId={selectedId} onSelect={setSelectedId}/></Card><Card className="p-4"><h3 className="mb-3 font-bold">Locations</h3><div className="space-y-2">{filteredLocations.map(l=>{const a=getAQI(l);const c=category(a.value);return <button key={l.id} onClick={()=>setSelectedId(l.id)} className={`flex w-full items-center justify-between rounded-xl border p-3 text-left ${selectedId===l.id?'border-[#82c9ab] bg-[#f2faf6]':'border-[#e8efeb] hover:bg-[#fafcfb]'}`}><span><span className="block text-sm font-semibold">{l.city}</span><span className="text-xs text-[#91a49b]">{l.state} · {a.dominant}</span></span><span className="text-right"><span className="block text-lg font-bold" style={{color:c.color}}>{a.value}</span><span className="text-[10px]" style={{color:c.color}}>{c.label}</span></span></button>})}</div></Card></div></>}
+        {/* ---------------- MAP ---------------- */}
+        {view === 'map' && <>
+          <SectionTitle title="Live Map" subtitle="Geospatial view of stations with data" />
+          <div className="grid gap-5 xl:grid-cols-[1.6fr_1fr]">
+            <Card className="p-4"><AirMap points={filtered} selectedId={selectedId} onSelect={(id) => openStation(id, 'map')} /></Card>
+            <Card className="p-4"><h3 className="mb-3 font-bold">Stations</h3><div className="max-h-[420px] space-y-2 overflow-y-auto pr-1">{filtered.map(({ station, aqi }) => { const c = category(aqi.value); return <button key={station.id} onClick={() => openStation(station.id)} className={`flex w-full items-center justify-between rounded-xl border p-3 text-left ${selectedId === station.id ? 'border-[#82c9ab] bg-[#f2faf6]' : 'border-[#e8efeb] hover:bg-[#fafcfb]'}`}><span><span className="block text-sm font-semibold">{station.city}</span><span className="text-xs text-[#91a49b]">{station.station}</span></span><span className="text-right"><span className="block text-lg font-bold" style={{ color: c.color }}>{aqi.value}</span><span className="text-[10px]" style={{ color: c.color }}>{c.label}</span></span></button>; })}</div></Card>
+          </div>
+        </>}
 
-        {view==='investigate'&&<><SectionTitle title="Location Investigation" subtitle="Inspect readings, data quality, local conditions and evidence for a selected location" action={<select value={selectedId} onChange={e=>setSelectedId(e.target.value)} className="rounded-lg border border-[#dce8e2] bg-white px-3 py-2 text-sm">{locations.map(l=><option key={l.id} value={l.id}>{l.city}</option>)}</select>}/><div className="mb-4 rounded-xl border border-[#f1dfb6] bg-[#fff9eb] p-3 text-xs text-[#87631d]">Readings may be DEMO or modelled estimates. AQI is calculated from available averaged values; modelled grid estimates are not official ground-station AQI. Pollution-source attribution is not inferred.</div><div className="grid gap-4 md:grid-cols-3"><Metric label="Calculated AQI" value={currentAQI.value} icon={Gauge} tone={currentCategory.color} sub={currentCategory.label}/><Metric label="Dominant pollutant" value={currentAQI.dominant} icon={Activity} sub="Highest available sub-index"/><Metric label="Observation freshness" value={selectedDataMode} icon={Clock3} tone={selectedDataMode === "MODEL" ? "#16855d" : "#b47718"} sub={selected.updated}/></div><div className="mt-5 grid gap-5 xl:grid-cols-2"><Card className="p-5"><h3 className="font-bold">Pollutant measurements</h3><p className="mb-4 mt-1 text-xs text-[#8aa096]">{selectedDataMode === 'MODEL' ? 'Open-Meteo model estimates averaged over recent hourly values' : 'Sample concentrations · averaging periods are not supplied in this demo'}</p><div className="space-y-4">{pollutantRows.map(p=><div key={p.name}><div className="mb-1 flex justify-between text-xs"><span className="font-semibold text-[#4b6b5e]">{p.name}</span><span>{p.value} {p.unit}</span></div><div className="h-2 overflow-hidden rounded-full bg-[#edf3ef]"><div className="h-full rounded-full bg-[#1ba574]" style={{ width: `${Math.min(100, (p.value / p.scale) * 100)}%` }}/></div></div>)}</div></Card><Card className="p-5"><h3 className="font-bold">Weather context</h3><p className="mb-4 mt-1 text-xs text-[#8aa096]">{selectedDataMode === 'MODEL' ? 'Open-Meteo weather context' : 'Sample context values; not live weather'}</p><div className="grid grid-cols-2 gap-3"><Metric label="Temperature" value={selected.temp} unit="°C" icon={Thermometer} tone="#d8893c"/><Metric label="Humidity" value={selected.humidity} unit="%" icon={Droplets} tone="#438bc2"/><Metric label="Wind speed" value={selected.wind} unit="km/h" icon={Wind}/><Metric label="Wind direction" value={selected.windDir} icon={Navigation}/></div><div className="mt-4 rounded-xl bg-[#f5f9f7] p-3 text-xs leading-5 text-[#6d877b]"><Info size={14} className="mr-1 inline"/>Weather can provide context for interpreting pollutant patterns, but correlation alone does not establish a pollution source.</div></Card></div><Card className="mt-5 p-5"><h3 className="font-bold">Evidence and data-quality checks</h3><div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{[{title:'Source mode',status:selectedDataMode,detail:selectedDataMode==='MODEL'?'Open-Meteo modelled grid estimates':'Synthetic sample dataset',ok:selectedDataMode==='MODEL'},{title:'Location coordinates',status:'Present',detail:'Latitude and longitude available',ok:true},{title:'Timestamp',status:'Present',detail:selected.updated,ok:true},{title:'Averaging period',status:'Not supplied',detail:'Verify before official AQI reporting',ok:false}].map(x=><div key={x.title} className="rounded-xl border border-[#e7efea] p-3"><div className="flex items-center gap-2 text-sm font-semibold">{x.ok?<CheckCircle2 size={16} className="text-[#159767]"/>:<CircleAlert size={16} className="text-[#c38a2d]"/>}{x.title}</div><div className="mt-2 text-xs font-semibold" style={{color:x.ok?'#159767':'#b27a20'}}>{x.status}</div><p className="mt-1 text-xs leading-5 text-[#8ba097]">{x.detail}</p></div>)}</div></Card></>}
+        {/* ---------------- INVESTIGATE ---------------- */}
+        {view === 'investigate' && <>
+          <SectionTitle title="Location Investigation" subtitle={`${sel.city} — ${sel.station}`}
+            action={<div className="flex items-center gap-2">
+              <select value={selectedId} onChange={(e) => setSelectedId(e.target.value)} className="rounded-lg border border-[#dce8e2] bg-white px-3 py-2 text-sm">{COMPUTED.map(({ station }) => <option key={station.id} value={station.id}>{station.city} — {station.station}</option>)}</select>
+              <button onClick={() => notify('Refresh fetches Open-Meteo modelled estimates for this station.')} className="flex items-center gap-2 rounded-xl border border-[#dce8e2] bg-white px-3 py-2 text-xs font-semibold text-[#3c6556]"><RefreshCw size={14} /> Refresh</button>
+            </div>} />
 
-        {view==='forecast'&&<><SectionTitle title="Forecast & Trends" subtitle="Historical patterns and transparent baseline projections"/><div className="mb-4 rounded-xl border border-[#f1dfb6] bg-[#fff9eb] p-3 text-xs text-[#87631d]">BASELINE DEMO FORECAST: this is an illustrative persistence/rolling-trend scenario, not a validated live prediction. No accuracy claim is made.</div><div className="grid gap-5 xl:grid-cols-2"><Card className="p-5"><h3 className="font-bold">Historical AQI trend</h3><p className="mb-4 mt-1 text-xs text-[#8aa096]">Illustrative sample · AQI by hour</p><div className="h-[280px]"><ResponsiveContainer width="100%" height="100%"><LineChart data={history}><CartesianGrid stroke="#edf2ef" strokeDasharray="3 3"/><XAxis dataKey="time" tick={{fontSize:10}}/><YAxis tick={{fontSize:10}}/><Tooltip/><Line type="monotone" dataKey="aqi" stroke="#07875c" strokeWidth={2.5} dot={false} name="AQI"/><Line type="monotone" dataKey="pm25" stroke="#e5a52c" strokeWidth={2} dot={false} name="PM2.5"/></LineChart></ResponsiveContainer></div></Card><Card className="p-5"><h3 className="font-bold">Next 24-hour baseline</h3><p className="mb-4 mt-1 text-xs text-[#8aa096]">Estimate and illustrative range</p><div className="h-[280px]"><ResponsiveContainer width="100%" height="100%"><AreaChart data={forecast}><CartesianGrid stroke="#edf2ef" strokeDasharray="3 3"/><XAxis dataKey="time" tick={{fontSize:10}}/><YAxis tick={{fontSize:10}}/><Tooltip/><Area type="monotone" dataKey="high" stroke="#b6d8c7" fill="#eaf5ef" name="Upper illustrative range"/><Area type="monotone" dataKey="low" stroke="#b6d8c7" fill="#fff" name="Lower illustrative range"/><Line type="monotone" dataKey="aqi" stroke="#07875c" strokeWidth={2.5} name="Baseline AQI"/></AreaChart></ResponsiveContainer></div></Card></div><Card className="mt-5 p-5"><h3 className="font-bold">How to interpret this forecast</h3><div className="mt-3 grid gap-3 md:grid-cols-3">{[{n:'1',t:'Historical input',d:'A real deployment needs sufficient timestamped observations with consistent units and averaging periods.'},{n:'2',t:'Baseline estimate',d:'A simple persistence or rolling-average baseline is easier to audit than an unsupported AI prediction.'},{n:'3',t:'Validate over time',d:'Compare predictions with later observations using a time-ordered holdout and report MAE when enough data exists.'}].map(x=><div key={x.n} className="rounded-xl bg-[#f5f9f7] p-4"><div className="mb-2 flex h-7 w-7 items-center justify-center rounded-full bg-[#dff3e8] text-xs font-bold text-[#087c55]">{x.n}</div><div className="text-sm font-semibold">{x.t}</div><p className="mt-1 text-xs leading-5 text-[#81968d]">{x.d}</p></div>)}</div></Card></>}
 
-        {view==='alerts'&&<><SectionTitle title="Alert Center" subtitle="Configure AQI or pollutant thresholds and review alert rules"/><div className="grid gap-5 xl:grid-cols-[.85fr_1.15fr]"><Card className="p-5"><h3 className="font-bold">Create alert rule</h3><p className="mb-4 mt-1 text-xs text-[#8aa096]">Rules are stored in this browser session in the current prototype.</p><label className="mb-1 block text-xs font-semibold text-[#668176]">Location</label><select value={alertLocation} onChange={e=>setAlertLocation(e.target.value)} className="mb-4 w-full rounded-lg border border-[#dce8e2] p-2.5 text-sm">{locations.map(l=><option key={l.id}>{l.city}</option>)}</select><label className="mb-1 block text-xs font-semibold text-[#668176]">Metric</label><select value={alertPollutant} onChange={e=>setAlertPollutant(e.target.value)} className="mb-4 w-full rounded-lg border border-[#dce8e2] p-2.5 text-sm"><option>AQI</option><option>PM2.5</option></select><label className="mb-1 block text-xs font-semibold text-[#668176]">Trigger threshold (1–500)</label><input type="number" min="1" max="500" step="1" value={alertThreshold} onChange={e=>setAlertThreshold(Number(e.target.value))} className="mb-4 w-full rounded-lg border border-[#dce8e2] p-2.5 text-sm"/><button onClick={addAlert} className="w-full rounded-xl bg-[#173b32] px-4 py-3 text-sm font-semibold text-white hover:bg-[#225344]">Save alert rule</button></Card><Card className="p-5"><div className="mb-4 flex items-center justify-between"><h3 className="font-bold">Configured rules</h3><Badge>{alerts.length} RULES</Badge></div><div className="space-y-3">{alerts.map(a=>{const loc=locations.find(l=>l.city===a.location);const val=loc?(a.pollutant==='AQI'?getAQI(loc).value:loc.pm25):0;const triggered=a.enabled&&val>=a.threshold;return <div key={a.id} className="rounded-xl border border-[#e7efea] p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><div className="font-semibold">{a.location} · {a.pollutant} ≥ {a.threshold}</div><div className="mt-1 text-xs text-[#879b92]">Current demo value: {val} · {triggered?'Threshold met':'Threshold not met'}</div></div><div className="flex items-center gap-2"><Badge color={triggered?'#c77d20':'#16855d'} bg={triggered?'#fff4df':'#e5f7ee'}>{triggered?'TRIGGERED':'MONITORING'}</Badge><button onClick={()=>setAlerts(prev=>prev.map(x=>x.id===a.id?{...x,enabled:!x.enabled}:x))} className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${a.enabled?'bg-[#e5f7ee] text-[#087c55]':'bg-[#f1f4f2] text-[#7d9289]'}`}>{a.enabled?'Enabled':'Disabled'}</button><button onClick={()=>setAlerts(prev=>prev.filter(x=>x.id!==a.id))} className="rounded-lg p-2 text-[#9aaba4] hover:bg-[#fff0f0] hover:text-[#d65055]"><X size={15}/></button></div></div></div>})}</div></Card></div><Card className="mt-5 p-5"><h3 className="font-bold">Suggested response</h3><p className="mt-2 text-sm leading-6 text-[#71877d]">When a threshold is reached, confirm the observation timestamp and averaging period, compare nearby readings, consult official local advisories, and avoid attributing a cause until supported by evidence.</p></Card></>}
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <Card className="p-5"><div className="flex items-center justify-between"><span className="text-xs font-semibold uppercase tracking-wider text-[#83988f]">Latest AQI</span><Gauge size={18} color={selCategory.color} /></div><div className="mt-3 flex items-end gap-3"><div className="text-5xl font-bold tracking-tight" style={{ color: selCategory.color }}>{selAqi.value}</div><div className="pb-1"><Badge color={selCategory.color} bg={selCategory.bg}>{selCategory.label}</Badge><div className="mt-1 text-xs text-[#8ba097]">{sel.district}, {sel.state}</div></div></div><p className="mt-2 text-xs text-[#71887e]">Dominant: {selAqi.dominant ? POLLUTANTS.find((p) => p.key === selAqi.dominant)?.name : '—'} · {sel.updated}</p></Card>
+            <Metric label="Median AQI · 12 mo" value={selBaseline.medianAqi} icon={LineChartIcon} tone="#438bc2" sub={`Typical range ${selBaseline.p25}–${selBaseline.p75}`} />
+            <Metric label="Seasonal median · Sep" value={seasonal?.medianAqi ?? '—'} icon={TrendingUp} tone="#8a63c9" sub={seasonal ? `Sep range ${seasonal.p25}–${seasonal.p75}` : 'No seasonal history'} />
+            <Metric label="Anomaly status" value={selAnomaly.isAnomalous ? 'Flagged' : 'Normal'} icon={selAnomaly.isAnomalous ? TriangleAlert : CheckCircle2} tone={selAnomaly.isAnomalous ? '#c2542d' : '#159767'} sub={selAnomaly.isAnomalous ? selAnomaly.reasons[0] : 'Within health bands and seasonal norm'} />
+          </div>
 
-        {view==='passports'&&<><SectionTitle title="Evidence Passports" subtitle="Traceable record of an observation, its source and AQI calculation" action={<button onClick={exportCSV} className="flex items-center gap-2 rounded-xl border border-[#dce8e2] bg-white px-3 py-2 text-xs font-semibold text-[#3c6556]"><Download size={14}/> Export locations CSV</button>}/><div className="mb-4 rounded-xl border border-[#f1dfb6] bg-[#fff9eb] p-3 text-xs text-[#87631d]">Passports preserve the current record mode. Modelled estimates are not authenticated government ground-station records.</div><div className="grid gap-5 xl:grid-cols-[1fr_1.2fr]"><Card className="p-4"><h3 className="mb-3 font-bold">Available records</h3><div className="space-y-2">{locations.map(l=>{const a=getAQI(l);const c=category(a.value);return <button key={l.id} onClick={()=>setSelectedId(l.id)} className={`flex w-full items-center justify-between rounded-xl border p-3 text-left ${selectedId===l.id?'border-[#8ac9ad] bg-[#f3faf6]':'border-[#e7efea]'}`}><span><span className="block text-sm font-semibold">{l.city}</span><span className="text-xs text-[#8ca097]">{l.id} · {dataModes[l.id] ?? 'DEMO'}</span></span><span className="text-lg font-bold" style={{color:c.color}}>{a.value}</span></button>})}</div></Card><Card className="p-5"><div className="flex items-start justify-between gap-3"><div><div className="flex items-center gap-2"><FileCheck2 size={20} className="text-[#0a9566]"/><h3 className="font-bold">Observation Passport</h3></div><p className="mt-1 text-xs text-[#8aa096]">Record ID: AP-{selected.id}-{selectedDataMode}</p></div><Badge color={selectedDataMode === 'MODEL' ? '#087443' : '#b47718'} bg={selectedDataMode === 'MODEL' ? '#e5f7ee' : '#fff5df'}>{selectedDataMode}</Badge></div><div className="mt-5 grid grid-cols-2 gap-3"><div className="rounded-xl bg-[#f5f9f7] p-3"><div className="text-xs text-[#8aa096]">Location</div><div className="mt-1 font-semibold">{selected.city}, {selected.state}</div></div><div className="rounded-xl bg-[#f5f9f7] p-3"><div className="text-xs text-[#8aa096]">Calculated AQI</div><div className="mt-1 text-2xl font-bold" style={{color:currentCategory.color}}>{currentAQI.value} <span className="text-xs">{currentCategory.label}</span></div></div><div className="rounded-xl bg-[#f5f9f7] p-3"><div className="text-xs text-[#8aa096]">Dominant pollutant</div><div className="mt-1 font-semibold">{currentAQI.dominant}</div></div><div className="rounded-xl bg-[#f5f9f7] p-3"><div className="text-xs text-[#8aa096]">AQI standard</div><div className="mt-1 font-semibold">CPCB India</div></div></div><div className="mt-4 space-y-2 text-xs text-[#6f887d]"><p><Check size={14} className="mr-1 inline text-[#0a9566]"/>Coordinates recorded: {selected.lat}, {selected.lng}</p><p><Check size={14} className="mr-1 inline text-[#0a9566]"/>Sample timestamp: {selected.updated}</p><p><CircleAlert size={14} className="mr-1 inline text-[#b77b20]"/>Source provider and averaging period not verified in this demo.</p></div><button onClick={exportPassport} className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-[#173b32] px-4 py-3 text-sm font-semibold text-white hover:bg-[#225344]"><Download size={16}/> Export Evidence Passport (JSON)</button><button onClick={()=>window.print()} className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl border border-[#dce8e2] px-4 py-3 text-sm font-semibold text-[#426557]"><FileCheck2 size={16}/> Print passport</button></Card></div></>}
+          <div className="mt-5 grid gap-5 xl:grid-cols-[1.1fr_1fr]">
+            <Card className="p-5">
+              <h3 className="font-bold">Baseline · median & typical range by month</h3>
+              <p className="mb-4 mt-1 text-xs text-[#8aa096]">12-month history · dashed line = September median, red = current reading</p>
+              <div className="h-[260px]"><ResponsiveContainer width="100%" height="100%"><AreaChart data={monthlyChart}>
+                <defs><linearGradient id="bandFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#bfe3d2" stopOpacity={0.55} /><stop offset="100%" stopColor="#e8f5ee" stopOpacity={0.15} /></linearGradient></defs>
+                <CartesianGrid stroke="#edf2ef" strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="month" tick={{ fontSize: 10, fill: '#8aa096' }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fontSize: 10, fill: '#8aa096' }} axisLine={false} tickLine={false} />
+                <Tooltip />
+                <Area type="monotone" dataKey="p75" stroke="none" fill="url(#bandFill)" name="Typical upper (p75)" />
+                <Area type="monotone" dataKey="p25" stroke="none" fill="#ffffff" name="Typical lower (p25)" />
+                <Line type="monotone" dataKey="median" stroke="#438bc2" strokeWidth={2} dot={false} name="Monthly median" />
+                <Line type="monotone" dataKey="current" stroke="#e84e55" strokeWidth={2} dot={{ r: 4 }} name="Current" connectNulls={false} />
+                {seasonal && <ReferenceLine y={seasonal.medianAqi} stroke="#8a63c9" strokeDasharray="5 4" label={{ value: 'Sep median', fontSize: 10, fill: '#8a63c9' }} />}
+              </AreaChart></ResponsiveContainer></div>
+              <div className="mt-3 grid grid-cols-2 gap-3 text-xs sm:grid-cols-4">{SEASONS.map((s) => {
+                const rows = selBaseline.monthly.filter((m) => s.months.includes(m.month));
+                const avg = rows.length ? Math.round(rows.reduce((sum, m) => sum + m.medianAqi, 0) / rows.length) : null;
+                return <div key={s.name} className="rounded-xl bg-[#f5f9f7] p-3"><div className="font-semibold text-[#42695a]">{s.name}</div><div className="mt-1 text-lg font-bold text-[#193a31]">{avg ?? '—'}</div><div className="text-[10px] text-[#8aa096]">avg monthly median</div></div>;
+              })}</div>
+            </Card>
+            <Card className="p-5">
+              <h3 className="font-bold">Pollutant profile vs typical concentrations</h3>
+              <p className="mb-4 mt-1 text-xs text-[#8aa096]">Current value with location's typical (median) level</p>
+              <div className="space-y-4">{pollutantRows.map((p) => {
+                const typical = selBaseline.typicalConcentrations[p.key as PollutantKey];
+                const above = typeof typical === 'number' && p.concentration > typical * 1.3;
+                return <div key={p.name}>
+                  <div className="mb-1 flex justify-between text-xs"><span className="font-semibold text-[#4b6b5e]">{p.name}</span><span>{p.concentration} {p.unit} <span className="text-[#8aa096]">· sub-index {p.index}</span></span></div>
+                  <div className="relative h-2.5 overflow-hidden rounded-full bg-[#edf3ef]"><div className="h-full rounded-full" style={{ width: `${Math.min(100, (p.concentration / p.scale) * 100)}%`, background: above ? '#e0703a' : '#1ba574' }} />{typeof typical === 'number' && <span className="absolute top-[-3px] h-[17px] w-[2px] bg-[#438bc2]" style={{ left: `${Math.min(100, (typical / p.scale) * 100)}%` }} title={`Typical: ${typical}`} />}</div>
+                  <div className="mt-0.5 text-[10px] text-[#8aa096]">typical here: {typeof typical === 'number' ? `${typical} ${p.unit}` : 'n/a'}</div>
+                </div>;
+              })}</div>
+              <div className="mt-4 rounded-xl bg-[#f5f9f7] p-3 text-xs leading-5 text-[#6d877b]"><Info size={14} className="mr-1 inline" />Blue tick = the location's typical median concentration. Bars past it, in orange, run above normal for this place.</div>
+            </Card>
+          </div>
 
-        {view==='settings'&&<><SectionTitle title="Settings & Data Sources" subtitle="Prototype configuration, data provenance and implementation readiness"/><div className="grid gap-5 lg:grid-cols-2"><Card className="p-5"><div className="flex items-center gap-2"><Database size={18} className="text-[#0b9466]"/><h3 className="font-bold">Data-source status</h3></div><div className="mt-4 space-y-3">{[{name:'Air quality provider',status:'Optional public endpoint',detail:'Refresh fetches Open-Meteo gridded air-quality estimates for the selected location. These are not ground-station observations.'},{name:'Weather provider',status:'Optional public endpoint',detail:'Refresh fetches Open-Meteo weather context for the selected location.'},{name:'Supabase persistence',status:'Not connected in this ZIP',detail:'Configure project URL, anon key, schema, and RLS before claiming persistent storage.'},{name:'OpenStreetMap tiles',status:'Available',detail:'Map tiles require network access and must follow provider usage policies.'}].map(s=><div key={s.name} className="rounded-xl border border-[#e7efea] p-3"><div className="flex items-center justify-between gap-3"><div className="text-sm font-semibold">{s.name}</div><Badge color={s.status==='Available'?'#16855d':'#b47720'} bg={s.status==='Available'?'#e5f7ee':'#fff5df'}>{s.status}</Badge></div><p className="mt-1 text-xs leading-5 text-[#83988f]">{s.detail}</p></div>)}</div></Card><Card className="p-5"><div className="flex items-center gap-2"><SlidersHorizontal size={18} className="text-[#0b9466]"/><h3 className="font-bold">AQI and prototype notes</h3></div><div className="mt-4 space-y-3 text-sm leading-6 text-[#6f887d]"><p><strong className="text-[#345749]">Default region:</strong> India · CPCB AQI breakpoints.</p><p><strong className="text-[#345749]">Important:</strong> the prototype currently uses sample values. Official AQI reporting also depends on required pollutant availability and specified averaging periods. Verify these before presenting calculated results as official observations.</p><p><strong className="text-[#345749]">Security:</strong> keep provider secrets in server-side environment variables or Edge Functions. Never place service-role keys in browser code.</p><p><strong className="text-[#345749]">Next implementation step:</strong> connect live APIs, persist observations and alert rules in Supabase, and add automated tests for AQI breakpoints and missing-data behavior.</p></div><button onClick={()=>notify('Readiness checklist opened: APIs → Supabase/RLS → tests → deployment.')} className="mt-4 flex items-center gap-2 rounded-xl border border-[#dce8e2] px-4 py-2.5 text-sm font-semibold text-[#426557]"><CircleHelp size={16}/> Show readiness checklist</button></Card></div></>}
+          <div className="mt-5 grid gap-5 xl:grid-cols-2">
+            <Card className="p-5">
+              <h3 className="font-bold flex items-center gap-2"><TriangleAlert size={17} className="text-[#c2542d]" /> Abnormal-pollution detection</h3>
+              <p className="mb-4 mt-1 text-xs text-[#8aa096]">Both checks shown: CPCB health band and statistical deviation from this location's baseline</p>
+              <div className="space-y-3">
+                <div className={`rounded-xl border p-4 ${selAnomaly.healthFlag ? 'border-[#f3c9b5] bg-[#fff6f1]' : 'border-[#e7efea] bg-[#fafcfb]'}`}>
+                  <div className="flex items-center justify-between"><span className="text-sm font-semibold">1 · CPCB health category</span><Badge color={selAnomaly.healthFlag ? '#c2542d' : '#159767'} bg={selAnomaly.healthFlag ? '#ffe9df' : '#e5f7ee'}>{selAnomaly.healthFlag ? 'FLAGGED' : 'WITHIN BANDS'}</Badge></div>
+                  <p className="mt-2 text-xs leading-5 text-[#6d877b]">{selAnomaly.healthDetail}</p>
+                </div>
+                <div className={`rounded-xl border p-4 ${selAnomaly.deviationFlag ? 'border-[#f3c9b5] bg-[#fff6f1]' : 'border-[#e7efea] bg-[#fafcfb]'}`}>
+                  <div className="flex items-center justify-between"><span className="text-sm font-semibold">2 · Deviation from local baseline</span><Badge color={selAnomaly.deviationFlag ? '#c2542d' : '#159767'} bg={selAnomaly.deviationFlag ? '#ffe9df' : '#e5f7ee'}>{selAnomaly.deviationFlag ? 'UNUSUAL RISE' : 'WITHIN NORM'}</Badge></div>
+                  <p className="mt-2 text-xs leading-5 text-[#6d877b]">{selAnomaly.deviationDetail}{selAnomaly.seasonalMedian !== null && ` September median for this station: ${selAnomaly.seasonalMedian}.`}</p>
+                </div>
+                <div className="rounded-xl border border-[#e7efea] bg-[#fafcfb] p-4"><ConfidenceBar confidence={selAnomaly.confidence} /></div>
+              </div>
+            </Card>
+            <Card className="p-5">
+              <h3 className="font-bold">Possible causes & context</h3>
+              <p className="mb-4 mt-1 text-xs text-[#8aa096]">Inferred from pollutant mix + weather — labelled as possible, not confirmed</p>
+              <div className="grid grid-cols-2 gap-3"><Metric label="Temperature" value={sel.temp} unit="°C" icon={Thermometer} tone="#d8893c" /><Metric label="Humidity" value={sel.humidity} unit="%" icon={Droplets} tone="#438bc2" /><Metric label="Wind speed" value={sel.wind} unit="km/h" icon={Wind} /><Metric label="Wind direction" value={sel.windDir} icon={Navigation} /></div>
+              <div className="mt-4 space-y-2">{selCauses.map((c) => <div key={c.label} className="rounded-xl border border-[#e7efea] p-3"><div className="flex items-center justify-between gap-2"><span className="text-sm font-semibold text-[#315347]">{c.label}</span><Badge color={c.likelihood === 'Higher' ? '#c2542d' : c.likelihood === 'Moderate' ? '#b8860b' : '#6b8a80'} bg={c.likelihood === 'Higher' ? '#ffe9df' : c.likelihood === 'Moderate' ? '#fff5df' : '#eef3f1'}>{c.likelihood}</Badge></div><p className="mt-1 text-xs leading-5 text-[#81978f]">{c.basis}</p></div>)}</div>
+              <p className="mt-3 rounded-xl bg-[#f5f9f7] p-3 text-[11px] leading-5 text-[#6d877b]">{CAUSE_DISCLAIMER}</p>
+            </Card>
+          </div>
+
+          <Card className="mt-5 p-5">
+            <h3 className="font-bold">Evidence & data-quality checks</h3>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              {[{ title: 'Source mode', status: selMode, detail: sel.sourceDetail, ok: selMode === 'MODEL' },
+              { title: 'Station identity', status: 'CAAQMS-style ID', detail: `${sel.id} · ${sel.station}`, ok: true },
+              { title: 'Timestamp', status: 'Present', detail: sel.updated, ok: true },
+              { title: 'Official CPCB record', status: 'Not linked', detail: 'Compare with the official dashboard before operational use.', ok: false }].map((x) => <div key={x.title} className="rounded-xl border border-[#e7efea] p-3"><div className="flex items-center gap-2 text-sm font-semibold">{x.ok ? <CheckCircle2 size={16} className="text-[#159767]" /> : <CircleAlert size={16} className="text-[#c38a2d]" />}{x.title}</div><div className="mt-2 text-xs font-semibold" style={{ color: x.ok ? '#159767' : '#b27a20' }}>{x.status}</div><p className="mt-1 text-xs leading-5 text-[#8ba097]">{x.detail}</p></div>)}
+            </div>
+          </Card>
+        </>}
+
+        {/* ---------------- ALERTS ---------------- */}
+        {view === 'alerts' && <>
+          <SectionTitle title="Anomaly Alerts & Recommendations" subtitle="Health-band + baseline-deviation detection across all stations"
+            action={<div className="flex items-center gap-2">
+              {lastRun && <span className="text-xs text-[#8aa096]">Last run {lastRun}</span>}
+              <button onClick={runDetection} className="flex items-center gap-2 rounded-xl bg-[#173b32] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#225344]"><Sparkles size={14} /> Run detection now</button>
+            </div>} />
+
+
+          <div className="grid gap-5 xl:grid-cols-[1.35fr_1fr]">
+            <div className="space-y-4">
+              {alertHistory.length === 0 && <Card className="p-8 text-center"><Sparkles size={22} className="mx-auto text-[#0b9868]" /><p className="mt-3 text-sm font-semibold">No detection run yet</p><p className="mt-1 text-xs text-[#8aa096]">Run detection to scan all {COMPUTED.length} stations against CPCB bands and their seasonal baselines.</p></Card>}
+              {alertHistory.map((a) => {
+                const live = findStation(a.locationId);
+                const status = resolveStatus(a, live?.aqi.value ?? a.aqi, a.baselineMedian);
+                const sevColor = a.severity === 'Emergency' ? '#9b2638' : a.severity === 'Alert' ? '#ef8734' : '#e9b329';
+                const sevBg = a.severity === 'Emergency' ? '#f9e5e9' : a.severity === 'Alert' ? '#fff0e2' : '#fff6d9';
+                return <Card key={a.id} className="p-5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div><div className="flex items-center gap-2"><h3 className="font-bold">{a.locationName}</h3><Badge color={sevColor} bg={sevBg}>{a.severity.toUpperCase()}</Badge><Badge color={status === 'Active' ? '#c2542d' : '#159767'} bg={status === 'Active' ? '#ffe9df' : '#e5f7ee'}>{status}</Badge></div><p className="mt-1 text-xs text-[#8aa096]">Detected {new Date(a.detectedAt).toLocaleString()} · AQI {a.aqi} ({a.categoryLabel}) · dominant {a.dominant}</p></div>
+                    <div className="text-right"><div className="text-2xl font-bold" style={{ color: sevColor }}>{a.aqi}</div><div className="text-[10px] text-[#8aa096]">baseline {a.baselineMedian}{a.seasonalMedian !== null ? ` · Sep ${a.seasonalMedian}` : ''}</div></div>
+                  </div>
+                  <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
+                    <div className="rounded-lg bg-[#f5f9f7] p-3"><span className="font-semibold text-[#42695a]">Baseline comparison:</span> {a.deviationPct !== null ? <span style={{ color: a.deviationPct >= 50 ? '#c2542d' : '#b8860b' }}>+{a.deviationPct}% vs typical</span> : 'atypical not computed'} {a.seasonalMedian !== null && <span className="text-[#8aa096]">· same-month median {a.seasonalMedian}</span>}</div>
+                    <div className="rounded-lg bg-[#f5f9f7] p-3"><span className="font-semibold text-[#42695a]">Confidence:</span> {Math.round(a.confidence * 100)}% <span className="text-[#8aa096]">· reasons: {a.reasonsCount}</span></div>
+                  </div>
+                  <div className="mt-3"><span className="text-xs font-semibold text-[#42695a]">Possible causes:</span> {a.possibleCauses.length ? <span className="text-xs text-[#6d877b]"> {a.possibleCauses.join(' · ')}</span> : <span className="text-xs text-[#6d877b]"> none inferred</span>}</div>
+                  <div className="mt-2"><span className="text-xs font-semibold text-[#42695a]">Recommended precautions:</span><ul className="mt-1 list-disc pl-5 text-xs leading-5 text-[#6d877b]">{a.precautions.map((p) => <li key={p}>{p}</li>)}</ul></div>
+                </Card>;
+              })}
+            </div>
+            <div className="space-y-5">
+              <Card className="p-5"><h3 className="font-bold">Trigger rules (optional)</h3><p className="mb-4 mt-1 text-xs text-[#8aa096]">Stations can also alert on a fixed AQI threshold, in addition to anomaly detection.</p>
+                <label className="mb-1 block text-xs font-semibold text-[#668176]">Station</label>
+                <select onChange={(e) => setAlertRules((prev) => [...prev.filter((r) => r.stationId !== e.target.value), { id: Date.now(), stationId: e.target.value, threshold: alertThreshold, enabled: true }])} className="mb-4 w-full rounded-lg border border-[#dce8e2] p-2.5 text-sm" defaultValue="">{COMPUTED.map(({ station }) => <option key={station.id} value={station.id}>{station.city} — {station.station}</option>)}</select>
+                <label className="mb-1 block text-xs font-semibold text-[#668176]">Threshold (1–500)</label>
+                <input type="number" min={1} max={500} value={alertThreshold} onChange={(e) => setAlertThreshold(Number(e.target.value))} className="mb-4 w-full rounded-lg border border-[#dce8e2] p-2.5 text-sm" />
+                <div className="space-y-2">{alertRules.map((r) => { const st = findStation(r.stationId); return <div key={r.id} className="flex items-center justify-between rounded-xl border border-[#e7efea] p-3 text-xs"><span><span className="font-semibold">{st?.station.city}</span> ≥ {r.threshold}</span><button onClick={() => setAlertRules((prev) => prev.filter((x) => x.id !== r.id))} className="text-[#9aaba4] hover:text-[#d65055]"><X size={14} /></button></div>; })}</div>
+              </Card>
+              <Card className="p-5"><h3 className="font-bold">Return-to-baseline tracking</h3><p className="mb-3 mt-1 text-xs text-[#8aa096]">Alerts auto-resolve when readings fall back to ≤10% above the baseline median.</p>
+                <div className="space-y-2">{alertHistory.slice(0, 8).map((a) => { const status = resolveStatus(a, findStation(a.locationId)?.aqi.value ?? a.aqi, a.baselineMedian); return <div key={a.id} className="flex items-center justify-between rounded-lg bg-[#f5f9f7] px-3 py-2 text-xs"><span className="truncate pr-2 font-medium text-[#315347]">{a.locationName}</span><Badge color={status === 'Active' ? '#c2542d' : '#159767'} bg={status === 'Active' ? '#ffe9df' : '#e5f7ee'}>{status}</Badge></div>; })}{alertHistory.length === 0 && <p className="text-xs text-[#8aa096]">Run detection to populate history.</p>}</div>
+              </Card>
+            </div>
+          </div>
+        </>}
+
+        {/* ---------------- SETTINGS ---------------- */}
+        {view === 'settings' && <><SectionTitle title="Settings & Data Sources" subtitle="Configuration, provenance and readiness" />
+          <div className="grid gap-5 lg:grid-cols-2">
+            <Card className="p-5"><div className="flex items-center gap-2"><Database size={18} className="text-[#0b9466]" /><h3 className="font-bold">Data-source status</h3></div>
+              <div className="mt-4 space-y-3">
+                {[{ name: 'CPCB All India AQI Dashboard', status: 'Official reference', detail: 'airquality.cpcb.gov.in — station-based coverage; used here as the definitional reference for AQI bands and category labels.' },
+                { name: 'Station dataset', status: 'Loaded subset', detail: `${COMPUTED.length} stations across ${STATES.length} states with current values and 12-month history.` },
+                { name: 'Open-Meteo (optional refresh)', status: 'Modelled estimates', detail: 'Per-station refresh switches mode to MODEL with gridded estimates — not ground observations.' },
+                { name: 'Supabase persistence', status: 'Not connected', detail: 'Alert history lives in browser state; configure schema + RLS before production use.' }].map((s) => <div key={s.name} className="rounded-xl border border-[#e7efea] p-3"><div className="flex items-center justify-between gap-3"><div className="text-sm font-semibold">{s.name}</div><Badge color={s.status === 'Official reference' ? '#16855d' : '#b47720'} bg={s.status === 'Official reference' ? '#e5f7ee' : '#fff5df'}>{s.status}</Badge></div><p className="mt-1 text-xs leading-5 text-[#83988f]">{s.detail}</p></div>)}
+              </div></Card>
+            <Card className="p-5"><div className="flex items-center gap-2"><SlidersHorizontal size={18} className="text-[#0b9466]" /><h3 className="font-bold">Methodology notes</h3></div>
+              <div className="mt-4 space-y-3 text-sm leading-6 text-[#6f887d]">
+                <p><strong className="text-[#345749]">AQI:</strong> CPCB India breakpoints; sub-index max = AQI; dominant pollutant reported.</p>
+                <p><strong className="text-[#345749]">Baseline:</strong> median, p25–p75 from 12 months of history; same-month comparison for seasonality.</p>
+                <p><strong className="text-[#345749]">Anomaly:</strong> flagged when CPCB band ≥ Poor or reading ≥ 1.5× the seasonal/annual median.</p>
+                <p><strong className="text-[#345749]">Causes:</strong> possible contributors from pollutant mix and weather; never asserted as confirmed sources.</p>
+                <p><strong className="text-[#345749]">Next steps:</strong> live CAAQMS ingestion, Supabase persistence with RLS, automated tests for breakpoints and missing-data behavior.</p>
+              </div>
+              <button onClick={() => notify('Readiness checklist: official APIs → persistence → tests → deployment.')} className="mt-4 flex items-center gap-2 rounded-xl border border-[#dce8e2] px-4 py-2.5 text-sm font-semibold text-[#426557]"><CircleHelp size={16} /> Show readiness checklist</button>
+            </Card>
+          </div></>}
       </div>
-      <footer className="border-t border-[#e4ece8] bg-white px-6 py-4 text-center text-[10px] text-[#91a49b]">AirPulse AI · Urban Air Quality & Pollution Alert System · Demo prototype · Verify source data before operational use</footer>
+
+      <footer className="border-t border-[#e4ece8] bg-white px-6 py-4 text-center text-[10px] text-[#91a49b]">AirPulse AI · Urban Air Quality & Pollution Alert System · Official reference: CPCB All India AQI Dashboard</footer>
     </main>
-    {toast&&<div role="status" className="fixed bottom-5 right-5 z-[1000] flex items-center gap-2 rounded-xl bg-[#173b32] px-4 py-3 text-sm font-medium text-white shadow-xl"><CheckCircle2 size={17} className="text-[#61d9a6]"/>{toast}</div>}
+    {toast && <div role="status" className="fixed bottom-5 right-5 z-[1000] flex items-center gap-2 rounded-xl bg-[#173b32] px-4 py-3 text-sm font-medium text-white shadow-xl"><CheckCircle2 size={17} className="text-[#61d9a6]" />{toast}</div>}
   </div>;
 }

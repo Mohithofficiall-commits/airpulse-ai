@@ -2,7 +2,7 @@
 
 **Urban Air Quality & Pollution Alert System**
 
-AirPulse AI is a responsive decision-support prototype for viewing urban air-quality readings, calculating a CPCB-style AQI from available pollutant values, exploring locations on a map, reviewing historical trends, configuring alerts, and exporting traceable observation passports.
+AirPulse AI is a responsive decision-support prototype for exploring station-level air quality across India, calculating CPCB-style AQI, establishing local historical baselines, detecting abnormal pollution, investigating possible causes, and generating traceable alerts with recommendations.
 
 ## Stack
 - React + TypeScript + Vite
@@ -17,29 +17,23 @@ npm install
 npm run dev
 ```
 
-## Current prototype status
-The uploaded project has been adapted from a methane-specific interface to AirPulse AI. The current build uses **clearly labeled illustrative demo data**. Live air-quality/weather API credentials and Supabase persistence are not configured in this ZIP.
+## Features
 
-Implemented in the prototype:
-- Responsive dashboard and navigation
-- CPCB India breakpoint-based pollutant sub-index calculation for demo values
-- Interactive map with sample Indian city locations
-- Location investigation, pollutant readings and weather context
-- Illustrative historical trend and baseline forecast panel
-- Client-side alert rule creation, toggling and deletion
-- Evidence Passport JSON export, CSV export and print
-- Explicit demo-mode and data-quality notices
+1. **All-India city & town explorer** — search by state, city, district, town or monitoring station; filter by state and CPCB category; results include latest AQI, dominant pollutant, vs-baseline deviation, timestamp and source. Official reference: **CPCB All India AQI Dashboard** (airquality.cpcb.gov.in), whose coverage is based on CAAQMS monitoring stations — not every town or neighbourhood.
+2. **Normal baseline** — per-station median AQI, p25–p75 typical range, monthly medians, seasonal aggregates and typical pollutant concentrations computed from 12 months of illustrative history; current readings are compared with the same location and same time of year.
+3. **Abnormal-pollution detection** — flags readings on two grounds shown together: CPCB health category (≥ Poor bands) and statistical deviation (≥ 1.5× the seasonal/annual median baseline).
+4. **Possible-cause investigation** — examines pollutant mix alongside weather context to surface possible contributors (traffic, dust, industry, waste burning, stagnant weather) — always labelled **possible**, never confirmed.
+5. **Alerts & recommendations** — each alert carries affected location, current AQI, baseline comparison, dominant pollutant, severity (Watch/Alert/Emergency), detection time, possible causes, data confidence and recommended precautions. History is kept in-session and each alert tracks whether pollution returned to baseline.
 
 ## Important data limitations
-- Sample readings and historical/forecast charts are illustrative, not live measurements.
-- The demo records do not include verified averaging-period metadata. Official AQI reporting must enforce CPCB data-availability and averaging-period requirements.
-- The forecast is an illustrative baseline and has not been validated. Do not report predictive accuracy.
-- Alerts are held in browser state and are not persisted to Supabase.
-- Pollution-source attribution is not inferred from AQI readings alone.
+- The bundled dataset is a small **illustrative subset** of stations with synthetic current values and history. Absence of a location means no data here, not clean air.
+- Refresh-per-station switches that station to **MODEL** mode (Open-Meteo gridded estimates) — not ground-station observations.
+- No averaging-period metadata is enforced; official AQI reporting requires CPCB data-availability rules.
+- Alert history lives in browser state; Supabase persistence is not configured.
 
 ## Recommended next steps
-1. Integrate an air-quality and weather provider through a secure server-side adapter; preserve source, units, observation timestamps and retrieval timestamps.
-2. Add Supabase tables, migrations and Row Level Security for observations, alert rules and Evidence Passports.
-3. Add tests for AQI breakpoints, missing data, valid AQI zero, unit/averaging-period validation, API failure fallback and alert behavior.
-4. Validate the forecast with time-ordered historical data before publishing performance metrics.
+1. Ingest live CAAQMS data through a secure server-side adapter, preserving source, units and timestamps.
+2. Add Supabase tables, migrations and RLS for observations, baselines and alert history.
+3. Add tests for AQI breakpoints, missing data, baseline computation and anomaly thresholds.
+4. Validate forecasting against time-ordered holdouts before publishing any accuracy metric.
 5. Run `npm run typecheck`, `npm run lint` and `npm run build` after installing dependencies.

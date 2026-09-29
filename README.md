@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/banner.svg" alt="AirPulse AI banner" width="100%"/>
+<img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=6,11,20&height=230&section=header&text=AirPulse%20AI&fontSize=64&fontColor=ffffff&animation=fadeIn&fontAlignY=36&desc=Urban%20Air%20Quality%20%26%20Pollution%20Alert%20System&descSize=22&descAlignY=58" alt="AirPulse AI" width="100%"/>
 
 [![Typing SVG](https://readme-typing-svg.demolab.com?font=Segoe+UI&weight=600&size=22&pause=1200&color=22D3EE&center=true&vCenter=true&width=760&lines=Know+which+pollutant+drives+the+AQI;See+how+fresh+every+reading+is;Validated+data%2C+labeled+honestly;Baseline+forecasts+with+published+error)](https://mohithofficiall-commits.github.io/airpulse-ai/)
 
@@ -29,17 +29,103 @@ Most AQI displays give one number. AirPulse tries to answer:
 | What if the source fails? | Fallback source → last good data → STALE → labeled DEMO |
 | How good is the forecast? | Baseline models with MAE / RMSE and sample size |
 
-> **Honesty note.** Feature status below reflects the design blueprint. Items must be confirmed against the repository before submission. Nothing here is a measured result.
+> **Honesty note.** Feature status reflects the design blueprint and must be confirmed against the repository. Nothing here is a measured result.
 
 ---
 
 ## 🏗 Architecture
 
-<div align="center">
-<img src="assets/architecture.svg" alt="Animated AirPulse AI system architecture" width="100%"/>
-</div>
+### Full system architecture
 
-<sub>Animated flow: blue dashes = valid data path, red = quarantined data, amber = operator-enabled demo path.</sub>
+```mermaid
+flowchart LR
+    subgraph SRC["1 · Data Sources"]
+        S1["Official AQI feed<br/>(candidate)"]
+        S2["Open aggregator<br/>(candidate)"]
+        S3["Weather API<br/>(candidate)"]
+        S4["IoT sensor gateway<br/>(optional, planned)"]
+        S5["Demo dataset<br/>(always labeled DEMO)"]
+    end
+
+    subgraph ING["2 · Ingest and Validate"]
+        I1["Scheduler<br/>15-60 min"]
+        I2["Source adapters<br/>timeout, retry x3, fallback"]
+        I3["Raw payload store"]
+        I4["Normalize<br/>units, UTC time, dedupe"]
+        I5{"Validate<br/>range, spike, missing,<br/>future timestamp"}
+        I6["Quarantine<br/>invalid values + reason"]
+    end
+
+    subgraph AQI["3 · AQI Intelligence"]
+        A1["Averaging windows<br/>24h / 8h, min 16h"]
+        A2["CPCB sub-index calculator<br/>breakpoints as JSON"]
+        A3["AQI = max sub-index<br/>dominant pollutant, category"]
+        A4["Freshness and quality flags<br/>fresh / aging / stale"]
+        A5["Baseline forecast<br/>persistence, seasonal, EWMA"]
+        A6["Alert rule evaluator<br/>cool-down + hysteresis"]
+    end
+
+    subgraph BE["4 · Supabase Backend"]
+        B1[("PostgreSQL")]
+        B2["Edge Functions<br/>ingest, compute, alert"]
+        B3["Row Level Security"]
+        B4["Realtime / REST"]
+        B5["Secrets store"]
+    end
+
+    subgraph OUT["5 · Outputs"]
+        O1["React dashboard<br/>map, AQI cards, history,<br/>freshness, provenance, DEMO badge"]
+        O2["Alert center<br/>email / push"]
+        O3["CSV / JSON export"]
+        O4["Run logs and health checks"]
+        O5["Tests<br/>AQI vectors, validation,<br/>fault injection, RLS"]
+    end
+
+    S1 --> I2
+    S2 --> I2
+    S3 --> I2
+    S4 -.-> I2
+    S5 -. "operator-enabled only" .-> A4
+
+    I1 --> I2 --> I3
+    I2 --> I4 --> I5
+    I5 -- invalid --> I6
+    I5 -- valid --> A1
+
+    A1 --> A2 --> A3 --> A4
+    A4 --> A5
+    A4 --> A6
+
+    A4 --> B1
+    A5 --> B1
+    A6 --> B2
+    B2 <--> B1
+    B3 --- B1
+    B5 --- B2
+    B1 --> B4
+
+    B4 --> O1
+    B2 --> O2
+    B1 --> O3
+    I2 --> O4
+    O5 -.-> I5
+    O5 -.-> A2
+
+    classDef src fill:#0e2a3a,stroke:#22d3ee,color:#e2f6ff
+    classDef ing fill:#10263f,stroke:#38bdf8,color:#e2f6ff
+    classDef aqi fill:#1c2f14,stroke:#a3e635,color:#f0ffe0
+    classDef be fill:#2a1f3d,stroke:#a78bfa,color:#f1eaff
+    classDef out fill:#3a2410,stroke:#f97316,color:#fff1e6
+    classDef bad fill:#3a1010,stroke:#f87171,color:#ffeaea
+    classDef demo fill:#3b2a0a,stroke:#f59e0b,color:#fff6dd
+    class S1,S2,S3,S4 src
+    class S5 demo
+    class I1,I2,I3,I4,I5 ing
+    class I6 bad
+    class A1,A2,A3,A4,A5,A6 aqi
+    class B1,B2,B3,B4,B5 be
+    class O1,O2,O3,O4,O5 out
+```
 
 ### Data flow
 
@@ -97,9 +183,9 @@ flowchart TD
 
 - Sub-index per pollutant → **overall AQI = max sub-index**; that pollutant is the **dominant pollutant**.
 - Requires **≥ 3 pollutants, at least one PM2.5 or PM10**; otherwise "insufficient data".
-- Averaging: PM2.5/PM10/NO₂/SO₂/NH₃ 24 h · O₃ 8 h · CO 8 h; about **16 h minimum** of data per window.
-- Piecewise-linear formula: `Ip = ((I_hi − I_lo) / (BP_hi − BP_lo)) × (Cp − BP_lo) + I_lo`
-- Breakpoints live in **data (JSON), not code**, and each AQI record stores `methodology` + `methodology_version`.
+- Averaging: PM2.5 / PM10 / NO₂ / SO₂ / NH₃ 24 h · O₃ 8 h · CO 8 h; about **16 h minimum** of data per window.
+- Formula: `Ip = ((I_hi − I_lo) / (BP_hi − BP_lo)) × (Cp − BP_lo) + I_lo`
+- Breakpoints live in **data (JSON), not code**; each AQI record stores `methodology` + `methodology_version`.
 - Values above the top band cap at 500 with an `above_scale` flag.
 
 **Illustrative test vector** (to be locked by tests): PM2.5 = 75 µg/m³ → ≈ 148.8 → **149**.
@@ -130,7 +216,7 @@ erDiagram
 ## 🔔 Alerts and 📈 Forecast
 
 - **Alerts:** category crossing, dominant-pollutant change, stale data for a subscribed station. Cool-down + hysteresis; **demo data never triggers real notifications**.
-- **Forecast:** persistence, seasonal naive, moving average/EWMA. Walk-forward evaluation, **MAE / RMSE with n** shown. Under minimum history the UI says *"Forecast unavailable"* and never invents a value.
+- **Forecast:** persistence, seasonal naive, moving average / EWMA. Walk-forward evaluation, **MAE / RMSE with n** shown. With too little history the UI says *"Forecast unavailable"* and never invents a value.
 
 ---
 
@@ -141,7 +227,7 @@ erDiagram
 | Frontend | React, hosted on GitHub Pages |
 | Backend | Supabase (PostgreSQL, Auth, RLS, Realtime, Edge Functions) |
 | Ingestion | Scheduled adapters (sources to be verified for access, licensing, limits) |
-| Testing | AQI vectors, validation, fault-injection, RLS checks |
+| Testing | AQI vectors, validation, fault injection, RLS checks |
 
 ---
 
@@ -153,7 +239,7 @@ erDiagram
 | 1 | Core MVP: adapter → validation → CPCB engine → dashboard | ☐ confirm |
 | 2 | Resilience: retry, quarantine, STALE, labeled demo fallback | ☐ confirm |
 | 3 | History charts and alerts | ☐ confirm |
-| 4 | Baseline forecast + MAE/RMSE | ☐ confirm |
+| 4 | Baseline forecast + MAE / RMSE | ☐ confirm |
 | 5 | Hardening: second source, RLS audit, benchmarks, more regions | 📋 planned |
 
 ---
@@ -182,6 +268,6 @@ Informational only, not medical advice · does not reduce emissions · baseline 
 
 **[Open the live app →](https://mohithofficiall-commits.github.io/airpulse-ai/)**
 
-Built for a hackathon · transparency over hype
+<img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=6,11,20&height=120&section=footer" width="100%" alt=""/>
 
 </div>

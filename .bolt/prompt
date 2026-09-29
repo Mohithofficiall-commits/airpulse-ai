@@ -1,0 +1,22 @@
+AirPulse AI — Urban Air Quality & Pollution Alert System
+
+Continue this existing React + TypeScript + Vite + Tailwind prototype. Preserve the white/off-white and forest-green/emerald design.
+
+Current implemented prototype features:
+- Responsive overview and navigation
+- CPCB India breakpoint-based AQI calculation for illustrative sample pollutant values
+- Interactive Leaflet/OpenStreetMap location map
+- Location investigation and pollutant/weather context
+- Historical trend and clearly labeled illustrative baseline forecast
+- Configurable AQI/PM2.5 alert rules in client-side state
+- Evidence Passport JSON export, CSV export and print view
+- Explicit DEMO labels; no live provider or Supabase connection is configured yet
+
+Important: Do not describe sample data as live. Before claiming official CPCB AQI, ensure required pollutant availability, units and averaging periods are valid. Do not invent source attribution, model accuracy, or health outcomes.
+
+Next priorities:
+1. Add a server-side/provider adapter for real air-quality and weather APIs with timeout handling, source attribution, timestamps, validation and honest demo fallback.
+2. Connect Supabase/PostgreSQL persistence for observations, alert rules and evidence records; preserve RLS and keep secrets server-side.
+3. Add automated tests for CPCB breakpoint calculations, missing pollutants, AQI zero, alerts, fallback behavior and data freshness.
+4. Evaluate forecast behavior against time-ordered observations before reporting accuracy.
+5. Run typecheck, lint, tests and production build. Report only checks actually run.
